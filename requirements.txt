@@ -1,0 +1,4 @@
+-e ../eve_shared/EveDataset
+numpy
+Pillow
+pytest
