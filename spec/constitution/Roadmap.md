@@ -46,14 +46,30 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 
     **Visual pre-check:** `notebooks/inspect_f_flip.ipynb` — exercises the flip logic inline (no `src/` module yet) for 10 randomly sampled valid `(exp_key, frame, patch)` cases (seed 42; 6 right-eye, 4 left-eye, frames spread mid-session). Layout per row: raw patch + gaze arrow | canonical patch + gaze arrow | gaze vector table (raw → flipped). Sanity checks: flip-then-flip = identity on image and vector, unit-norm preserved — all 10 PASS. The `spherical_to_unit` helper (MPIIGaze convention: `g = [-cos θ sin φ, -sin θ, -cos θ cos φ]`) is also prototyped here; it moves to a tested module in R1.
 
-- [ ] Define train/val/test split policy on top of EveDataset's existing `set` column and the strictest validity gate (`frame_validity` AND per-patch `validity`, both `True`).
+- [x] Define train/val/test split policy on top of EveDataset's existing per-subject split column and the strictest validity gate (`frame_validity` AND per-patch `validity`, both `True`). **Spec correction:** the column is exposed as `samples_df["split"]` (not `"set"` — `"set"` is `SampleTable`'s internal column name; `EveBundle.samples_df` renames it to `split`).
 
-## R1 — Data Pipeline
+## R1 — Data Pipeline ✓ DONE
 
-- Build a PyTorch `Dataset`/`DataModule` wrapping `EveBundle`: for each valid `(exp_key, frame, patch)`, fetches the face crop, produces the Zhang-normalized + flipped 128×128 eye crop via the R0 (F-NORM + F-FLIP) geometry module, and yields `(eye_crop_128, target_unit_vector, exp_key, frame, patch)`.
-- Implement and test the spherical `(theta, phi)` → 3D unit vector conversion (MPIIGaze convention) as an isolated, unit-tested function.
-- Implement and test image preprocessing (ImageNet normalization) on the extracted 128×128 crop.
-- Validate data pipeline against a handful of real samples end-to-end (crop shape, value range, target unit-norm ≈ 1) before any training run.
+- [x] **Build a PyTorch `Dataset`/`DataModule` wrapping `EveBundle`.** For each valid `(exp_key, frame, patch)`, fetches the face crop, produces the Zhang-normalized + canonically-flipped 128×128 eye crop via the R0 (F-NORM + F-FLIP) geometry modules, converts EveDataset's spherical `(theta, phi)` ground truth to a 3D unit vector (MPIIGaze convention), and applies ImageNet preprocessing, yielding `(eye_crop_128, target_unit_vector, exp_key, frame, patch)`.
+- [x] `spherical_to_unit(theta, phi)` (`src/eyenet/gaze_target.py`) — isolated, unit-tested spherical→unit-vector conversion.
+- [x] `preprocess_eye_crop(image)` (`src/eyenet/preprocessing.py`) — ImageNet-normalized `(3,128,128)` float32 tensor from a `(128,128,3)` uint8 crop.
+- [x] `build_sample_index(bundle, exp_keys)` (`src/eyenet/sampling.py`) — validity-gated `(exp_key, frame, patch)` DataFrame index.
+- [x] `assign_splits`, `make_train_val_split`, `save_split`, `load_split` (`src/eyenet/splits.py`) — EVE `val`→our `test`, EVE `train`→our `train`/`val` (seeded, persisted JSON manifest).
+- [x] `EyeGazeDataset` / `EyeGazeDataModule` (`src/eyenet/dataset.py`) — the R2 training script's integration point.
+- Validated against real samples end-to-end (`notebooks/inspect_data_pipeline.ipynb`, executed via `nbconvert`): split sizes match EVE's `val`↔our `test` 1:1 and `train+val`⊆EVE's `train`; validity-gate coverage ≈84.6% on a 20-exp_key sample (non-trivial, discriminating); 100 random targets all `‖g‖ = 1.0 ± 1e-4`; visual arrow-overlay spot-check; zero subject overlap across train/val/test. Also confirmed: zero EVE-test-subject leakage into `build_sample_index`'s output, and dataset outputs are reorder-invariant (no positional coupling on `sample_index` row order).
+- **Tests:** 30 new unit/integration tests (`tests/test_gaze_target.py`, `tests/test_preprocessing.py`, `tests/test_sampling.py`, `tests/test_splits.py`, `tests/test_dataset.py`), all passing (full suite: 78 passed, 1 pre-existing skip).
+
+## F-CALIB — Exclude calibration-prefix frames from the validity gate *(next; implement before R2 training starts)*
+
+**Evidence:** `notebooks/inspect_calibration_bias.ipynb` (300-exp_key sample, seed 42, using `EveBundle.get_screen_intercept`/`get_gaze_ray`/`get_frame_validity` — the new F-GAZE-RAY accessors, no re-derived geometry). Tobii calibrates at recording start; the first ~20 of 90 `center`-camera frames are strongly biased toward screen center — median screen-intercept distance to center is **14.5px** for frames 0–19 vs **171.7px** for frames 20–89 (~12x), with a visibly sharp break in the violin plot at that boundary. Validity-flag coverage is only mildly lower (91.2% vs 94.0%) — the existing validity gate does **not** catch this on its own, since a calibration-biased sample can still be flagged valid.
+
+**Decision:** a single explicit constant, not a per-recording heuristic. Add `CALIBRATION_PREFIX_FRAMES = 20` to `src/eyenet/sampling.py` and exclude `frame < CALIBRATION_PREFIX_FRAMES` in `build_sample_index`'s validity gate, alongside the existing `frame_validity`/per-patch `validity` AND. Rejected alternative: detecting the calibration cutoff per-exp_key (e.g. a distance-variance changepoint) — more "correct" in principle but adds real complexity and a new failure mode for a ~3pp validity-rate gain that's already mostly captured by the flat cutoff; revisit only if the fixed cutoff is later shown to mismatch some subjects.
+
+**Scope:**
+- `sampling.py`: add the constant and the frame-index exclusion, documented with a one-line pointer to the evidence notebook.
+- Update `build_sample_index`'s existing unit tests to cover the new exclusion (frame 19 excluded, frame 20 included, otherwise unchanged behavior).
+- Re-run `notebooks/inspect_data_pipeline.ipynb`'s coverage-rate check — expect the ≈84.6% figure to drop slightly (losing up to 20/90 frames per exp_key that were previously counted valid).
+- No change to `EyeGazeDataset`/`DataModule` — they consume `build_sample_index`'s output as-is.
 
 ## R2 — Model & Training Loop
 

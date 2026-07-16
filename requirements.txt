@@ -2,3 +2,8 @@
 numpy
 Pillow
 pytest
+torch
+torchvision
+pytorch-lightning
+pandas
+opencv-python

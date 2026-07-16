@@ -137,6 +137,24 @@ A `(exp_key, frame, patch)` sample is included in any split only if **both** hol
 
 No partial-validity relaxation or interpolation across invalid frames — this repo consumes EveDataset's validity flags as-is, strictest reading, no leniency.
 
+## R1 Data Pipeline (resolved)
+
+**Spec correction:** `EveBundle.samples_df`'s per-subject split label is exposed as column **`split`**, not `set` — `set` is `SampleTable`'s internal column name (`VALID_SETS = ("train","val","test")`); the public `samples_df` property renames it to `split`. All split logic reads `samples_df["split"]`.
+
+**Split policy:** EVE's `split=="test"` subjects are excluded entirely (no usable ground truth); EVE's `split=="val"` subjects become this project's `test` split untouched; EVE's `split=="train"` subjects are randomly partitioned **by subject** into this project's `train`/`val`, seeded and persisted as a JSON manifest (`{seed, val_fraction, assignment}`).
+
+New modules:
+
+| Module | Location | Functions |
+|---|---|---|
+| Gaze target conversion | `src/eyenet/gaze_target.py` | `spherical_to_unit(theta, phi)` → `(3,)`/`(N,3)` float32 unit vector |
+| Image preprocessing | `src/eyenet/preprocessing.py` | `preprocess_eye_crop(image)` → `(3,128,128)` float32 tensor, ImageNet-normalized |
+| Sample index | `src/eyenet/sampling.py` | `build_sample_index(bundle, exp_keys)` → validity-gated `(exp_key, frame, patch)` DataFrame |
+| Split assignment | `src/eyenet/splits.py` | `assign_splits(samples_df)`, `make_train_val_split(train_subjects, val_fraction, seed)`, `save_split(path, split, seed, val_fraction)`, `load_split(path)` |
+| Dataset/DataModule | `src/eyenet/dataset.py` | `EyeGazeDataset(bundle, crops_root, sample_index, split_assignment, target_split)` (`torch.utils.data.Dataset`); `EyeGazeDataModule(bundle, crops_root, split_source, batch_size, num_workers)` (`pytorch_lightning.LightningDataModule`) |
+
+`requirements.txt` now also pins `torch`, `torchvision`, `pytorch-lightning`, `pandas`, `opencv-python` (previously implicit/undeclared — `cv2` was already used by `src/eye_norm.py`).
+
 ## Export Format (R4)
 
 HDF5, `exp_key`-addressed, mirroring EveDataset's cache conventions:
