@@ -1,0 +1,29 @@
+# Cluster run config template. whole_train.sh renders this with envsubst into
+# $LOCAL_SCRATCH/eyenet_run_config.yaml before calling scripts/train.py --config on
+# the rendered file -- data paths point at the rsync'd local-scratch copy, not the
+# shared eve_shared mount, to keep training I/O off the network filesystem.
+data:
+  bundle_dir: ${LOCAL_SCRATCH}/data/bundle
+  crops_root: ${LOCAL_SCRATCH}/data/bundle
+  batch_size: 32
+  num_workers: 2            # matches #SBATCH --cpus-per-task
+  split_source:
+    seed: 42
+    val_fraction: 0.2
+model:
+  pretrained: true
+  lr: 1.0e-4
+  weight_decay: 0.0
+trainer:                    # passed through to pl.Trainer(**trainer) -- no limit_*,
+  max_epochs: 20             # this is a real run, not R2's subset smoke test
+  accelerator: auto
+  log_every_n_steps: 50
+output:
+  dir: runs/cluster_run_${RUN_DATETIME}
+logging:
+  wandb:
+    enabled: true
+    project: eyenet
+    entity: null
+    run_name: cluster_run_${RUN_DATETIME}
+    tags: []
