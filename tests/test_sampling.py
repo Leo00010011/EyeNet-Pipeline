@@ -1,6 +1,6 @@
 import numpy as np
 
-from eyenet.sampling import build_sample_index
+from eyenet.sampling import CALIBRATION_PREFIX_FRAMES, build_sample_index
 
 
 def test_index_rows_pass_validity_gate(sample_bundle, gaze_covered_exp_key):
@@ -15,6 +15,7 @@ def test_index_rows_pass_validity_gate(sample_bundle, gaze_covered_exp_key):
         assert row["exp_key"] == gaze_covered_exp_key
         assert frame_valid[row["frame"]] == True
         assert gaze_valid[row["patch"]][row["frame"]] == True
+        assert row["frame"] >= CALIBRATION_PREFIX_FRAMES
 
 
 def test_no_gaze_norm_contributes_zero_rows(sample_bundle):
@@ -35,6 +36,42 @@ def test_row_count_matches_hand_count(sample_bundle, gaze_covered_exp_key):
     expected = 0
     for patch in ("left", "right"):
         patch_valid = sample_bundle.get_normalized_gaze(gaze_covered_exp_key, patch)["validity"]
-        expected += int(np.count_nonzero(frame_valid & patch_valid))
+        mask = frame_valid & patch_valid
+        mask[:CALIBRATION_PREFIX_FRAMES] = False
+        expected += int(np.count_nonzero(mask))
     index = build_sample_index(sample_bundle, [gaze_covered_exp_key])
     assert len(index) == expected
+
+
+class _FakeBundle:
+    """Minimal stub exposing the accessor surface build_sample_index depends on."""
+
+    def __init__(self, n_frames=90):
+        self.n_frames = n_frames
+
+    def has_gaze_norm(self, exp_key):
+        return True
+
+    def has_face_crops(self, exp_key):
+        return True
+
+    def get_frame_validity(self, exp_key):
+        return np.ones(self.n_frames, dtype=bool)
+
+    def get_normalized_gaze(self, exp_key, patch):
+        return {"validity": np.ones(self.n_frames, dtype=bool)}
+
+
+def test_calibration_prefix_excluded():
+    bundle = _FakeBundle()
+    index = build_sample_index(bundle, ["fake_exp"])
+
+    assert 19 not in set(index[index["patch"] == "left"]["frame"])
+    assert 19 not in set(index[index["patch"] == "right"]["frame"])
+    assert 20 in set(index[index["patch"] == "left"]["frame"])
+    assert 20 in set(index[index["patch"] == "right"]["frame"])
+    assert 89 in set(index[index["patch"] == "left"]["frame"])
+    assert 89 in set(index[index["patch"] == "right"]["frame"])
+
+    assert len(index) == 2 * (90 - CALIBRATION_PREFIX_FRAMES)
+    assert index["frame"].min() >= CALIBRATION_PREFIX_FRAMES

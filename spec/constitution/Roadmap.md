@@ -59,7 +59,7 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 - Validated against real samples end-to-end (`notebooks/inspect_data_pipeline.ipynb`, executed via `nbconvert`): split sizes match EVE's `val`↔our `test` 1:1 and `train+val`⊆EVE's `train`; validity-gate coverage ≈84.6% on a 20-exp_key sample (non-trivial, discriminating); 100 random targets all `‖g‖ = 1.0 ± 1e-4`; visual arrow-overlay spot-check; zero subject overlap across train/val/test. Also confirmed: zero EVE-test-subject leakage into `build_sample_index`'s output, and dataset outputs are reorder-invariant (no positional coupling on `sample_index` row order).
 - **Tests:** 30 new unit/integration tests (`tests/test_gaze_target.py`, `tests/test_preprocessing.py`, `tests/test_sampling.py`, `tests/test_splits.py`, `tests/test_dataset.py`), all passing (full suite: 78 passed, 1 pre-existing skip).
 
-## F-CALIB — Exclude calibration-prefix frames from the validity gate *(next; implement before R2 training starts)*
+## F-CALIB — Exclude calibration-prefix frames from the validity gate ✓ DONE
 
 **Evidence:** `notebooks/inspect_calibration_bias.ipynb` (300-exp_key sample, seed 42, using `EveBundle.get_screen_intercept`/`get_gaze_ray`/`get_frame_validity` — the new F-GAZE-RAY accessors, no re-derived geometry). Tobii calibrates at recording start; the first ~20 of 90 `center`-camera frames are strongly biased toward screen center — median screen-intercept distance to center is **14.5px** for frames 0–19 vs **171.7px** for frames 20–89 (~12x), with a visibly sharp break in the violin plot at that boundary. Validity-flag coverage is only mildly lower (91.2% vs 94.0%) — the existing validity gate does **not** catch this on its own, since a calibration-biased sample can still be flagged valid.
 
@@ -70,6 +70,8 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 - Update `build_sample_index`'s existing unit tests to cover the new exclusion (frame 19 excluded, frame 20 included, otherwise unchanged behavior).
 - Re-run `notebooks/inspect_data_pipeline.ipynb`'s coverage-rate check — expect the ≈84.6% figure to drop slightly (losing up to 20/90 frames per exp_key that were previously counted valid).
 - No change to `EyeGazeDataset`/`DataModule` — they consume `build_sample_index`'s output as-is.
+
+**Implemented:** `CALIBRATION_PREFIX_FRAMES = 20` added to `src/eyenet/sampling.py`; `build_sample_index`'s per-`(exp_key, patch)` mask (`frame_valid & patch_valid`) now zeroes `[:CALIBRATION_PREFIX_FRAMES]` before `np.nonzero`, applied identically to both patches. No signature/column change. Tests: `tests/test_sampling.py` — 4 tests (existing 3 strengthened/updated, new `test_calibration_prefix_excluded` against a synthetic fake-bundle pinning the frame-19/20 boundary and the `2*(90-20)=140`-row count), all passing; full suite 79 passed / 1 pre-existing skip, no regressions. `notebooks/inspect_data_pipeline.ipynb` re-executed: 20-exp_key sample coverage dropped from ≈84.6% to **70.3%** (2532/3600 valid rows) — a bounded drop consistent with losing up to 20/90 frames per exp_key, not a collapse.
 
 ## R2 — Model & Training Loop
 
