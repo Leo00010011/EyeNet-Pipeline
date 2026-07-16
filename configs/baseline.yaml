@@ -1,0 +1,30 @@
+# R2 baseline run: proves the loop is correct end-to-end on a small subset.
+# Values are chosen to make the loop run, not to maximize accuracy (that is R3).
+data:
+  bundle_dir: ../eve_shared/EveDataset/bundle
+  crops_root: ../eve_shared/EveDataset/eve_out
+  batch_size: 32
+  num_workers: 4
+  split_source:            # exactly one of the two forms
+    seed: 42
+    val_fraction: 0.2
+    # path: splits/baseline_split.json
+model:
+  pretrained: true
+  lr: 1.0e-4
+  weight_decay: 0.0
+trainer:                   # passed through to pl.Trainer(**trainer)
+  max_epochs: 2
+  limit_train_batches: 50
+  limit_val_batches: 10
+  accelerator: auto
+  log_every_n_steps: 5
+output:
+  dir: runs/baseline
+logging:
+  wandb:
+    enabled: false      # R2 baseline stays offline; R3 flips this
+    project: eyenet
+    entity: null        # null => default entity for WANDB_API_KEY
+    run_name: null      # null => W&B generates one
+    tags: []

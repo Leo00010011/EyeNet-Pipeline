@@ -30,7 +30,7 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | Loss | Angular/cosine loss between predicted and ground-truth unit gaze vectors |
 | Target derivation | EveDataset spherical `(theta, phi)` → 3D unit vector via MPIIGaze convention: `g = [-cos(theta)sin(phi), -sin(theta), -cos(theta)cos(phi)]` |
 | Primary metric | Mean angular error (degrees) |
-| Experiment tracking | Weights & Biases |
+| Experiment tracking | `CSVLogger` (always on) + `WandbLogger` (F-WANDB, config-gated via `logging.wandb.enabled`, degrades gracefully) |
 
 ## Key Libraries
 
@@ -39,7 +39,8 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | `torch`, `torchvision` | Model, pretrained weights, image transforms |
 | `pytorch-lightning` | Training loop, checkpointing, logging integration |
 | `evedataset` | Data access (crops + normalized gaze ground truth) |
-| `wandb` | Experiment tracking |
+| `pyyaml` | Training-run config parsing (`configs/baseline.yaml`) |
+| `wandb` | Experiment tracking — added by F-WANDB; config-gated (`logging.wandb.enabled`), never exercised in tests |
 | `numpy` | Array/vector math (spherical↔unit-vector conversion, normalization matrix assembly) |
 | `opencv-python` (`cv2`) | `warpPerspective` for the Zhang data-normalization eye warp |
 | `h5py` or `pandas`/`parquet` | Persisting exported prediction datasets (format TBD — see Roadmap) |
@@ -183,3 +184,52 @@ Every row is self-describing — no reliance on row order matching any other fil
 | Module | Location | Functions |
 |---|---|---|
 | Eye-image normalization | `src/eye_norm.py` | `compose_warp(W, x0, y0)` → `(3,3) float64`; `normalize_eye(crop, H_crop, out_size=(128,128))` → `(128,128,3) uint8` |
+
+## New Modules (R2 — Model & Training Loop)
+
+| Module | Location | Surface |
+|---|---|---|
+| Angular loss & metric | `src/eyenet/losses.py` | `EPS = 1e-7`; `angular_loss(pred, target)` → scalar, radians; `angular_error_degrees(pred, target)` → `(B,)`, degrees. Both take `(B,3)` and raise `ValueError` otherwise. |
+| Model | `src/eyenet/model.py` | `GazeResNet18(pretrained=True)` — `forward(x)`: `(B,3,128,128)` → `(B,3)` unit vector |
+| Lightning module | `src/eyenet/lightning_module.py` | `GazeEstimationModule(pretrained=True, lr=1e-4, weight_decay=0.0)` — `training_step`/`validation_step`/`test_step`/`configure_optimizers` |
+| Training entrypoint | `scripts/train.py` | `main(config_path)`; CLI `py scripts/train.py --config configs/baseline.yaml` |
+| Baseline run config | `configs/baseline.yaml` | `data` / `model` / `trainer` / `output` blocks; `trainer:` is passed to `pl.Trainer` verbatim |
+
+### The `EPS` clamp in `losses.py` (do not remove)
+
+`arccos`' derivative `-1/sqrt(1-x²)` diverges at `cos = ±1`. A perfect prediction is not hypothetical — it is what training steers toward, and float32 rounding reaches exactly `1.0` first. Unclamped, the first such batch emits NaN gradients that propagate through every weight on the optimizer step, and the run silently finishes with a dead model. `EPS = 1e-7` caps `|grad| ≈ 2236`. Both `angular_loss` and `angular_error_degrees` clamp through one shared `_cos` helper, so there is no path to an unclamped `arccos`. `tests/test_losses.py::test_no_nan_gradient_at_cos_one` pins this and must not be weakened.
+
+### Run artifacts
+
+| Path | Content |
+|---|---|
+| `<output.dir>/checkpoints/last.ckpt`, `epoch=..-val_angular_error_deg=...ckpt` | Weights + hparams (`ModelCheckpoint`, `monitor="val/angular_error_deg"`, `mode="min"`, `save_top_k=1`) |
+| `<output.dir>/csv/version_*/metrics.csv` | Loss/metric history. Columns: `epoch`, `step`, **`train/loss_step`**, **`train/loss_epoch`** (logged `on_step`+`on_epoch` ⇒ Lightning splits it; there is no bare `train/loss`), `val/loss`, `val/angular_error_deg`. |
+
+Checkpoints are weights, not datasets — R2 writes no `exp_key`-addressed artifact, so Mission.md §3's positional-coupling rule binds at R4. R1's `(exp_key, frame, patch)` batch metadata passes through the training step untouched (`tests/test_batch_keys.py`); note `default_collate` delivers `exp_key`/`patch` as **tuples** of `str` and `frame` as an int tensor.
+
+## New Modules (F-WANDB)
+
+| Module | Location | Surface |
+|---|---|---|
+| Gaze-target inverse | `src/eyenet/gaze_target.py` | `unit_to_spherical(g: torch.Tensor) -> torch.Tensor` — `(B,3)`/`(3,)` unit vector → `(B,2)`/`(2,)` `[theta, phi]` radians. Torch, batched; the numpy `spherical_to_unit` is unmodified. Shares `EPS=1e-7` with `losses.py` for the `arcsin` pole clamp. |
+| Logger composition | `scripts/train.py` | `build_loggers(cfg: dict, out: Path) -> list` — `CSVLogger` always `logger[0]`; appends `WandbLogger` only when `logging.wandb.enabled` is `true` **and** `WANDB_API_KEY` is set **and** construction succeeds. Never raises — degrades to CSV-only with a `warnings.warn` on any failure. `wandb`/`WandbLogger` imported locally, only on the enabled path. |
+
+**Config schema addition (`logging:` block, `configs/*.yaml`):**
+```yaml
+logging:
+  wandb:
+    enabled: false      # default; absent block is equivalent
+    project: eyenet
+    entity: null         # null => default entity for WANDB_API_KEY
+    run_name: null       # null => W&B generates one
+    tags: []
+```
+
+**`WANDB_API_KEY` contract:** authentication is by environment variable only — `scripts/train.py` never calls `wandb.login()` and never prompts; the key is read by `wandb` itself. Set it in the job's submit script (not in `configs/*.yaml`, which is version-controlled) or in `~/.netrc`. A missing key with `enabled: true` warns and continues with `CSVLogger` only — it never fails a queued run. `WANDB_MODE=offline` is a supported *environment* escape hatch for no-outbound-network compute nodes; it requires no code or config change.
+
+**New logged metric names (`GazeEstimationModule`, epoch-level unless noted):** `train/angular_error_deg` (new; `val/angular_error_deg` unchanged from R2), `{train,val}/pred_var_{x,y,z}` (skipped if the epoch has <2 samples), `{train,val}/angular_error_deg_{left,right}` (skipped if that patch has 0 samples that epoch), `{train,val}/{theta,phi}_error_deg` (`phi` diff wrapped via `atan2(sin, cos)` before `abs()` to avoid a ~360° branch-cut artifact).
+
+### Run artifacts (F-WANDB addition)
+
+`<output.dir>/wandb/` appears alongside `csv/` and `checkpoints/` only when `logging.wandb.enabled` is `true` and a `WandbLogger` was successfully constructed (or when `WANDB_MODE=offline` buffers a run there). `csv/version_*/metrics.csv` is unmoved — `CSVLogger` stays `logger[0]`, so `trainer.log_dir` and `ModelCheckpoint`'s default directory are unaffected by whether W&B is enabled.

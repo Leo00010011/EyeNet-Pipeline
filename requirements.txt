@@ -7,3 +7,5 @@ torchvision
 pytorch-lightning
 pandas
 opencv-python
+pyyaml
+wandb
