@@ -19,16 +19,21 @@ echo "Mounting image "
 sudo mount_image.py my_env.ext4 --rw
 
 # Use single quotes for the definition to be safe
-SOURCE_DATA='/mnt/beegfs/home/leonardo.ulloa/projects/bundle'
-DEST_DATA="$LOCAL_SCRATCH/data/bundle"
+SOURCE_DATA='/mnt/beegfs/home/leonardo.ulloa/projects/bundle_shards'
+DEST_DATA="$LOCAL_SCRATCH/data/bundle_shards"
 
 # Create the directory
 mkdir -p "$DEST_DATA"
 
-echo "Transferring data to local scratch..."
+echo "Transferring data shards to local scratch..."
 
 # Ensure we quote the variables in the command
-rsync -aq "$SOURCE_DATA/" "$DEST_DATA/"
+rsync -a "$SOURCE_DATA/" "$DEST_DATA/"
+
+echo "Extracting data shards in local scratch..."
+
+7z x -y "$DEST_DATA/bundle.7z.001" -o"$LOCAL_SCRATCH/data/bundle"
+
 
 echo "Conda INIT"
 source /mnt/beegfs/home/leonardo.ulloa/miniconda3/etc/profile.d/conda.sh
