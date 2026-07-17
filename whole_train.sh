@@ -28,11 +28,11 @@ mkdir -p "$DEST_DATA"
 echo "Transferring data shards to local scratch..."
 
 # Ensure we quote the variables in the command
-rsync -a "$SOURCE_DATA" "$DEST_DATA/"
+rsync -avh --progress "$SOURCE_DATA" "$DEST_DATA/"
 
 echo "Extracting data shards in local scratch..."
 
-tar -xf "$DEST_DATA/bundle_chunk.tar" -C "$LOCAL_SCRATCH/data/"
+tar -xf "$DEST_DATA/bundle_chunk.tar" -C "$LOCAL_SCRATCH/data/" --checkpoint=10000 --checkpoint-action=echo="Extracted %u files"
 
 echo "Conda INIT"
 source /mnt/beegfs/home/leonardo.ulloa/miniconda3/etc/profile.d/conda.sh
