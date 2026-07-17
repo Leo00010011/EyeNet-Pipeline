@@ -17,7 +17,11 @@ class GazeResNet18(nn.Module):
         super().__init__()
         weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         self.backbone = resnet18(weights=weights)
-        self.backbone.fc = nn.Linear(512, 3)
+        self.backbone.fc = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.Dropout(0.5),
+            nn.Linear(256, 3),
+        )
 
     def forward(self, x):
         """(B,3,128,128) -> (B,3), L2-normalized to unit length."""

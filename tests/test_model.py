@@ -32,18 +32,21 @@ def test_output_rows_are_unit_norm(model):
 def test_128_input_needs_no_resize(model):
     model(torch.randn(1, 3, 128, 128))  # completes without error
     assert not any(isinstance(m, nn.Upsample) for m in model.modules())
-    assert isinstance(model.backbone.fc, nn.Linear)
-    assert (model.backbone.fc.in_features, model.backbone.fc.out_features) == (512, 3)
+    assert isinstance(model.backbone.fc, nn.Sequential)
+    linears = [m for m in model.backbone.fc if isinstance(m, nn.Linear)]
+    assert [(l.in_features, l.out_features) for l in linears] == [(512, 256), (256, 3)]
+    assert any(isinstance(m, nn.Dropout) and m.p == 0.5 for m in model.backbone.fc)
 
 
 def test_head_out_features_is_three(model):
-    assert GazeResNet18(pretrained=False).backbone.fc.out_features == 3
+    linears = [m for m in GazeResNet18(pretrained=False).backbone.fc if isinstance(m, nn.Linear)]
+    assert linears[-1].out_features == 3
 
 
 def test_gradients_flow_to_the_head():
     m = GazeResNet18(pretrained=False)
     m(torch.randn(2, 3, 128, 128)).sum().backward()
-    grad = m.backbone.fc.weight.grad
+    grad = m.backbone.fc[-1].weight.grad
     assert grad is not None
     assert torch.isfinite(grad).all()
 
