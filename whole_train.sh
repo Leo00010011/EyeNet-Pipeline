@@ -28,7 +28,7 @@ mkdir -p "$DEST_DATA"
 echo "Transferring data shards to local scratch..."
 
 # Ensure we quote the variables in the command
-rsync -a "$SOURCE_DATA/" "$DEST_DATA/"
+rsync -a "$SOURCE_DATA" "$DEST_DATA/"
 
 echo "Extracting data shards in local scratch..."
 
