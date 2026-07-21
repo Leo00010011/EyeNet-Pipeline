@@ -66,10 +66,12 @@ def test_calibration_prefix_excluded():
     bundle = _FakeBundle()
     index = build_sample_index(bundle, ["fake_exp"])
 
-    assert 19 not in set(index[index["patch"] == "left"]["frame"])
-    assert 19 not in set(index[index["patch"] == "right"]["frame"])
-    assert 20 in set(index[index["patch"] == "left"]["frame"])
-    assert 20 in set(index[index["patch"] == "right"]["frame"])
+    last_excluded = CALIBRATION_PREFIX_FRAMES - 1
+    first_included = CALIBRATION_PREFIX_FRAMES
+    assert last_excluded not in set(index[index["patch"] == "left"]["frame"])
+    assert last_excluded not in set(index[index["patch"] == "right"]["frame"])
+    assert first_included in set(index[index["patch"] == "left"]["frame"])
+    assert first_included in set(index[index["patch"] == "right"]["frame"])
     assert 89 in set(index[index["patch"] == "left"]["frame"])
     assert 89 in set(index[index["patch"] == "right"]["frame"])
 
