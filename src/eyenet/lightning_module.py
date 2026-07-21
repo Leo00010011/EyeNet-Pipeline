@@ -22,10 +22,12 @@ class GazeEstimationModule(pl.LightningModule):
         pretrained: bool = True,
         lr: float = 1e-4,
         weight_decay: float = 0.0,
+        hidden_dim: int = 256,
+        dropout: float = 0.5,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = GazeResNet18(pretrained=pretrained)
+        self.model = GazeResNet18(pretrained=pretrained, hidden_dim=hidden_dim, dropout=dropout)
         self._buf = {}
 
     def forward(self, x):
@@ -77,7 +79,7 @@ class GazeEstimationModule(pl.LightningModule):
         pred = torch.cat(b["pred"])  # (N, 3)
         target = torch.cat(b["target"])  # (N, 3)
         deg = torch.cat(b["deg"])  # (N,)
-        prefix = "train" if stage == "train" else "val"
+        prefix = stage
 
         if stage == "train":  # FR6; val/angular_error_deg already logged per-step
             self.log(f"{prefix}/angular_error_deg", deg.mean())

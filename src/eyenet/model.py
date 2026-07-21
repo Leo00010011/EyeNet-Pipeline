@@ -13,14 +13,20 @@ from torchvision.models import ResNet18_Weights, resnet18
 
 
 class GazeResNet18(nn.Module):
-    def __init__(self, pretrained: bool = True) -> None:
+    def __init__(
+        self,
+        pretrained: bool = True,
+        hidden_dim: int = 256,
+        dropout: float = 0.5,
+    ) -> None:
         super().__init__()
         weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         self.backbone = resnet18(weights=weights)
         self.backbone.fc = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.Dropout(0.5),
-            nn.Linear(256, 3),
+            nn.Linear(512, hidden_dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 3),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):

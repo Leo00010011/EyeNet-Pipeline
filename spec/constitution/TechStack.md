@@ -26,7 +26,7 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | Framework | PyTorch + PyTorch Lightning |
 | Input | 128×128 RGB eye crop |
 | Image normalization | ImageNet convention: scale to `[0,1]`, then `mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]` |
-| Regression head | FC layer(s) on ResNet18 backbone → 3-vector, L2-normalized to unit length |
+| Regression head | `Linear(512,hidden_dim) → Dropout → Linear(hidden_dim,3) → Dropout` on ResNet18 backbone → 3-vector, L2-normalized to unit length. `hidden_dim` (default 256) and `dropout` (default 0.5) are config-adjustable. |
 | Loss | Angular/cosine loss between predicted and ground-truth unit gaze vectors |
 | Target derivation | EveDataset spherical `(theta, phi)` → 3D unit vector via MPIIGaze convention: `g = [-cos(theta)sin(phi), -sin(theta), -cos(theta)cos(phi)]` |
 | Primary metric | Mean angular error (degrees) |
@@ -190,8 +190,8 @@ Every row is self-describing — no reliance on row order matching any other fil
 | Module | Location | Surface |
 |---|---|---|
 | Angular loss & metric | `src/eyenet/losses.py` | `EPS = 1e-7`; `angular_loss(pred, target)` → scalar, radians; `angular_error_degrees(pred, target)` → `(B,)`, degrees. Both take `(B,3)` and raise `ValueError` otherwise. |
-| Model | `src/eyenet/model.py` | `GazeResNet18(pretrained=True)` — `forward(x)`: `(B,3,128,128)` → `(B,3)` unit vector |
-| Lightning module | `src/eyenet/lightning_module.py` | `GazeEstimationModule(pretrained=True, lr=1e-4, weight_decay=0.0)` — `training_step`/`validation_step`/`test_step`/`configure_optimizers` |
+| Model | `src/eyenet/model.py` | `GazeResNet18(pretrained=True, hidden_dim=256, dropout=0.5)` — `forward(x)`: `(B,3,128,128)` → `(B,3)` unit vector |
+| Lightning module | `src/eyenet/lightning_module.py` | `GazeEstimationModule(pretrained=True, lr=1e-4, weight_decay=0.0, hidden_dim=256, dropout=0.5)` — `training_step`/`validation_step`/`test_step`/`configure_optimizers` |
 | Training entrypoint | `scripts/train.py` | `main(config_path)`; CLI `py scripts/train.py --config configs/baseline.yaml` |
 | Baseline run config | `configs/baseline.yaml` | `data` / `model` / `trainer` / `output` blocks; `trainer:` is passed to `pl.Trainer` verbatim |
 

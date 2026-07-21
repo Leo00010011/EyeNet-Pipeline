@@ -46,7 +46,8 @@ def test_head_out_features_is_three(model):
 def test_gradients_flow_to_the_head():
     m = GazeResNet18(pretrained=False)
     m(torch.randn(2, 3, 128, 128)).sum().backward()
-    grad = m.backbone.fc[-1].weight.grad
+    last_linear = [layer for layer in m.backbone.fc if isinstance(layer, nn.Linear)][-1]
+    grad = last_linear.weight.grad
     assert grad is not None
     assert torch.isfinite(grad).all()
 

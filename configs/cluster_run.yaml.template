@@ -14,6 +14,8 @@ model:
   pretrained: true
   lr: 1.0e-4
   weight_decay: 0.0
+  hidden_dim: 256
+  dropout: 0.5
 trainer:                    # passed through to pl.Trainer(**trainer) -- no limit_*,
   max_epochs: 20             # this is a real run, not R2's subset smoke test
   accelerator: auto

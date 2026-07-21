@@ -13,6 +13,8 @@ model:
   pretrained: true
   lr: 1.0e-4
   weight_decay: 0.0
+  hidden_dim: 256
+  dropout: 0.5
 trainer:                   # passed through to pl.Trainer(**trainer)
   max_epochs: 2
   limit_train_batches: 50
