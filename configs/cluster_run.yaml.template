@@ -5,7 +5,7 @@
 data:
   bundle_dir: ${LOCAL_SCRATCH}/data/bundle
   crops_root: ${LOCAL_SCRATCH}/data/bundle
-  batch_size: 32
+  batch_size: 128
   num_workers: 2            # matches #SBATCH --cpus-per-task
   split_source:
     seed: 42
