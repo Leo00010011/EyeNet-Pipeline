@@ -12,6 +12,7 @@ import torch
 
 from eyenet.gaze_target import unit_to_spherical
 from eyenet.losses import angular_error_degrees, angular_loss
+from eyenet.metrics import angular_variance
 from eyenet.model import GazeResNet18
 
 
@@ -39,7 +40,7 @@ class GazeEstimationModule(pl.LightningModule):
         return angular_loss(pred, target), per_sample_deg, pred, target
 
     def _reset_buffers(self, stage: str) -> None:
-        self._buf[stage] = {"pred": [], "deg": [], "patch": [], "theta_err": [], "phi_err": []}
+        self._buf[stage] = {"pred": [], "target": [], "deg": [], "patch": [], "theta_err": [], "phi_err": []}
 
     def on_train_epoch_start(self) -> None:
         self._reset_buffers("train")
@@ -52,6 +53,7 @@ class GazeEstimationModule(pl.LightningModule):
             self._reset_buffers(stage)
         b = self._buf[stage]
         b["pred"].append(pred.detach().cpu())
+        b["target"].append(target.detach().cpu())
         b["deg"].append(per_sample_deg.detach().cpu())
 
         # FR14: patch is a TUPLE OF str from default_collate, not a tensor.
@@ -64,7 +66,7 @@ class GazeEstimationModule(pl.LightningModule):
         d_theta = sp[:, 0] - st[:, 0]
         # FR19: phi comes from atan2 and wraps at +/-pi. Two near-identical gazes
         # straddling the branch cut would read as ~360 deg of error unwrapped.
-        d_phi = torch.atan2(torch.sin(sp[:, 1] - st[:, 1]), torch.cos(sp[:, 1] - st[:, 1]))
+        d_phi = torch.atan2(torch.sin(sp[:, 1] - st[:, 1]), torch.cos(sp[:, 1] - st[:, 1])) #TODO Check if this is right!
         b["theta_err"].append(torch.rad2deg(d_theta.abs()).cpu())
         b["phi_err"].append(torch.rad2deg(d_phi.abs()).cpu())
 
@@ -73,6 +75,7 @@ class GazeEstimationModule(pl.LightningModule):
         if not b or not b["deg"]:
             return
         pred = torch.cat(b["pred"])  # (N, 3)
+        target = torch.cat(b["target"])  # (N, 3)
         deg = torch.cat(b["deg"])  # (N,)
         prefix = "train" if stage == "train" else "val"
 
@@ -84,6 +87,12 @@ class GazeEstimationModule(pl.LightningModule):
             var = pred.var(dim=0)  # (3,) per-component, NOT pooled
             for i, axis in enumerate("xyz"):
                 self.log(f"{prefix}/pred_var_{axis}", var[i])
+
+            # Angular variance: mean angle from mean vector to each vector
+            pred_ang_var = angular_variance(pred)
+            target_ang_var = angular_variance(target)
+            self.log(f"{prefix}/pred_angular_variance_deg", pred_ang_var)
+            self.log(f"{prefix}/target_angular_variance_deg", target_ang_var)
 
         # FR12/FR15: per-eye, epoch-level. Absent patch => no rows => not logged.
         if b["patch"]:
