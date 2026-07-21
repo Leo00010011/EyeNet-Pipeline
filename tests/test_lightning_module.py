@@ -181,6 +181,8 @@ def test_per_eye_hand_computed_means_epoch_level():
 
     assert abs(captured["val/angular_error_deg_left"] - expected_left_mean) < 1e-3
     assert abs(captured["val/angular_error_deg_right"] - expected_right_mean) < 1e-3
+    assert abs(captured["val/left_angular_error_deg"] - expected_left_mean) < 1e-3
+    assert abs(captured["val/right_angular_error_deg"] - expected_right_mean) < 1e-3
 
     # FR13 pin: epoch-level mean != naive average of per-batch left-means.
     batch1_left_mean = angular_error_degrees(pred1, target1).mean().item()
@@ -312,6 +314,8 @@ def test_single_patch_epoch_logs_only_that_patch():
     m.on_validation_epoch_end()
     assert "val/angular_error_deg_left" in captured
     assert "val/angular_error_deg_right" not in captured
+    assert "val/left_angular_error_deg" in captured
+    assert "val/right_angular_error_deg" not in captured
 
 
 def test_two_tuple_batches_unaffected_no_per_eye_key():
@@ -322,6 +326,8 @@ def test_two_tuple_batches_unaffected_no_per_eye_key():
     m.on_validation_epoch_end()
     assert "val/angular_error_deg_left" not in captured
     assert "val/angular_error_deg_right" not in captured
+    assert "val/left_angular_error_deg" not in captured
+    assert "val/right_angular_error_deg" not in captured
 
 
 def test_buffers_reset_between_epochs():
