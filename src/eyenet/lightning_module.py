@@ -11,7 +11,7 @@ import pytorch_lightning as pl
 import torch
 
 from eyenet.gaze_target import unit_to_spherical
-from eyenet.losses import angular_error_degrees, angular_loss
+from eyenet.losses import angular_error_degrees, get_loss
 from eyenet.metrics import angular_variance
 from eyenet.model import GazeResNet18
 
@@ -24,10 +24,20 @@ class GazeEstimationModule(pl.LightningModule):
         weight_decay: float = 0.0,
         hidden_dim: int = 256,
         dropout: float = 0.5,
+        dropout1: float | None = None,
+        dropout2: float | None = None,
+        loss: str = "angular",
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = GazeResNet18(pretrained=pretrained, hidden_dim=hidden_dim, dropout=dropout)
+        self.model = GazeResNet18(
+            pretrained=pretrained,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            dropout1=dropout1,
+            dropout2=dropout2,
+        )
+        self._loss_fn = get_loss(loss)  # FR7: raises on a bad name at construction
         self._buf = {}
 
     def forward(self, x):
@@ -39,7 +49,9 @@ class GazeEstimationModule(pl.LightningModule):
         image, target = batch[0], batch[1]
         pred = self(image)
         per_sample_deg = angular_error_degrees(pred, target)  # (B,)
-        return angular_loss(pred, target), per_sample_deg, pred, target
+        # FR3: the reported metric stays angular_error_degrees whatever the
+        # training loss, so trials under different losses stay comparable.
+        return self._loss_fn(pred, target), per_sample_deg, pred, target
 
     def _reset_buffers(self, stage: str) -> None:
         self._buf[stage] = {"pred": [], "target": [], "deg": [], "patch": [], "theta_err": [], "phi_err": []}

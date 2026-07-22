@@ -9,3 +9,4 @@ pandas
 opencv-python
 pyyaml
 wandb
+optuna

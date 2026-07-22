@@ -18,15 +18,22 @@ class GazeResNet18(nn.Module):
         pretrained: bool = True,
         hidden_dim: int = 256,
         dropout: float = 0.5,
+        dropout1: float | None = None,
+        dropout2: float | None = None,
     ) -> None:
+        """`dropout` is a shim filling both head dropouts; explicit `dropout1` /
+        `dropout2` override it for their own layer (F-OPTUNA searches them
+        independently)."""
         super().__init__()
+        d1 = dropout if dropout1 is None else dropout1
+        d2 = dropout if dropout2 is None else dropout2
         weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         self.backbone = resnet18(weights=weights)
         self.backbone.fc = nn.Sequential(
             nn.Linear(512, hidden_dim),
-            nn.Dropout(dropout),
+            nn.Dropout(d1),
             nn.Linear(hidden_dim, 3),
-            nn.Dropout(dropout),
+            nn.Dropout(d2),
         )
 
     def forward(self, x):

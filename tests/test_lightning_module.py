@@ -349,3 +349,78 @@ def test_buffers_reset_between_epochs():
     # epoch2's theta/phi metrics must come only from epoch2 samples.
     assert abs(epoch2_theta - 0.0) < 1e-3  # pure-phi rotation => theta stays 0
     assert epoch1_deg is None or abs(epoch1_deg - 2.0) < abs(epoch1_deg - 8.0)
+
+
+# --- F-OPTUNA: configurable loss + checkpoint compat (Group 4) ---
+
+
+def test_loss_kwarg_selects_the_callable():
+    from eyenet.losses import angular_loss, cosine_loss
+
+    assert module(loss="cosine")._loss_fn is cosine_loss
+    assert module()._loss_fn is angular_loss  # default
+
+
+def test_bogus_loss_name_raises_at_construction():
+    """Fail fast: a typo must not surface mid-training, hours into a run."""
+    import pytest
+
+    with pytest.raises(ValueError, match="bogus"):
+        module(loss="bogus")
+
+
+def test_cosine_loss_path_actually_trains(tmp_path):
+    image, target = synthetic_batch()
+    loader = DataLoader(TensorDataset(image, target), batch_size=4)
+    m = module(lr=1e-3, dropout=0.0, loss="cosine")
+    history = LossHistory()
+    trainer = pl.Trainer(
+        overfit_batches=1, max_epochs=30, accelerator="cpu", logger=False,
+        enable_checkpointing=False, enable_progress_bar=False,
+        enable_model_summary=False, callbacks=[history],
+        default_root_dir=str(tmp_path),
+    )
+    trainer.fit(m, loader)
+    assert len(history.epochs) >= 2
+    assert history.epochs[-1] < history.epochs[0]
+
+
+def test_r2_era_checkpoint_still_loads(tmp_path):
+    """An R2 checkpoint stored only `dropout` -- the new kwargs must default
+    cleanly (loss='angular', dropouts via the shim) on load."""
+    m = GazeEstimationModule(pretrained=False, lr=1e-3, weight_decay=0.0,
+                             hidden_dim=256, dropout=0.0)
+    path = tmp_path / "r2.ckpt"
+    trainer = pl.Trainer(accelerator="cpu", logger=False, max_epochs=1,
+                         enable_checkpointing=False, enable_progress_bar=False,
+                         enable_model_summary=False, default_root_dir=str(tmp_path))
+    loader = DataLoader(TensorDataset(*synthetic_batch()), batch_size=4)
+    trainer.fit(m, loader)
+    trainer.save_checkpoint(path)
+
+    fixed = torch.randn(2, 3, 128, 128, generator=torch.Generator().manual_seed(7))
+    m.eval()
+    with torch.no_grad():
+        before = m(fixed)
+
+    loaded = GazeEstimationModule.load_from_checkpoint(path)
+    assert loaded.hparams.loss == "angular"
+    assert loaded._loss_fn is not None
+    loaded.eval()
+    with torch.no_grad():
+        after = loaded(fixed)
+    assert torch.allclose(before, after, atol=1e-6)
+
+
+def test_angular_error_metric_is_loss_invariant():
+    """FR3: val/angular_error_deg is angular_error_degrees whatever trained the
+    model -- that is what makes trials under different losses comparable."""
+    from eyenet.losses import angular_error_degrees
+
+    m = module(loss="cosine")
+    image, target = synthetic_batch()
+    m.eval()
+    with torch.no_grad():
+        _, per_sample_deg, pred, _ = m._step((image, target))
+        expected = angular_error_degrees(pred, target)
+    assert torch.allclose(per_sample_deg, expected, atol=1e-6)

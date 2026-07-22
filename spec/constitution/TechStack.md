@@ -26,8 +26,9 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | Framework | PyTorch + PyTorch Lightning |
 | Input | 128×128 RGB eye crop |
 | Image normalization | ImageNet convention: scale to `[0,1]`, then `mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]` |
-| Regression head | `Linear(512,hidden_dim) → Dropout → Linear(hidden_dim,3) → Dropout` on ResNet18 backbone → 3-vector, L2-normalized to unit length. `hidden_dim` (default 256) and `dropout` (default 0.5) are config-adjustable. |
-| Loss | Angular/cosine loss between predicted and ground-truth unit gaze vectors |
+| Regression head | `Linear(512,hidden_dim) → Dropout(dropout1) → Linear(hidden_dim,3) → Dropout(dropout2)` on ResNet18 backbone → 3-vector, L2-normalized to unit length. `hidden_dim` (default 256) is config-adjustable; the two dropouts are independent (F-OPTUNA), with `dropout` (default 0.5) retained as a shim filling both. |
+| Loss | Config-selectable via `losses.get_loss`: `angular` (arccos, radians — default) or `cosine` (`1 - ⟨x,x̂⟩`). Both over unit vectors. |
+| Hyperparameter search | Optuna (F-OPTUNA), `scripts/tune.py` + `configs/optuna.yaml`; objective is `val/angular_error_deg` |
 | Target derivation | EveDataset spherical `(theta, phi)` → 3D unit vector via MPIIGaze convention: `g = [-cos(theta)sin(phi), -sin(theta), -cos(theta)cos(phi)]` |
 | Primary metric | Mean angular error (degrees) |
 | Experiment tracking | `CSVLogger` (always on) + `WandbLogger` (F-WANDB, config-gated via `logging.wandb.enabled`, degrades gracefully) |
@@ -41,6 +42,7 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | `evedataset` | Data access (crops + normalized gaze ground truth) |
 | `pyyaml` | Training-run config parsing (`configs/baseline.yaml`) |
 | `wandb` | Experiment tracking — added by F-WANDB; config-gated (`logging.wandb.enabled`), never exercised in tests |
+| `optuna` | Hyperparameter search (F-OPTUNA) — study, TPE/random samplers, median/ASHA/Nop pruners. **`optuna-integration` is deliberately NOT a dependency** — see F-OPTUNA §Pruning callback below |
 | `numpy` | Array/vector math (spherical↔unit-vector conversion, normalization matrix assembly) |
 | `opencv-python` (`cv2`) | `warpPerspective` for the Zhang data-normalization eye warp |
 | `h5py` or `pandas`/`parquet` | Persisting exported prediction datasets (format TBD — see Roadmap) |
@@ -229,6 +231,57 @@ logging:
 **`WANDB_API_KEY` contract:** authentication is by environment variable only — `scripts/train.py` never calls `wandb.login()` and never prompts; the key is read by `wandb` itself. Set it in the job's submit script (not in `configs/*.yaml`, which is version-controlled) or in `~/.netrc`. A missing key with `enabled: true` warns and continues with `CSVLogger` only — it never fails a queued run. `WANDB_MODE=offline` is a supported *environment* escape hatch for no-outbound-network compute nodes; it requires no code or config change.
 
 **New logged metric names (`GazeEstimationModule`, epoch-level unless noted):** `train/angular_error_deg` (new; `val/angular_error_deg` unchanged from R2), `{train,val}/pred_var_{x,y,z}` (skipped if the epoch has <2 samples), `{train,val}/angular_error_deg_{left,right}` (skipped if that patch has 0 samples that epoch), `{train,val}/{theta,phi}_error_deg` (`phi` diff wrapped via `atan2(sin, cos)` before `abs()` to avoid a ~360° branch-cut artifact).
+
+## New Modules (F-OPTUNA — hyperparameter search)
+
+| Module | Location | Surface |
+|---|---|---|
+| Loss additions | `src/eyenet/losses.py` | `cosine_loss(pred, target)` → scalar, `1 - ⟨x,x̂⟩` meaned, range `[0,2]`; `get_loss(name)` → callable, `{"angular", "cosine"}`, `ValueError` otherwise. **Single source of truth for the `loss` config value** — no other module maps loss names. |
+| Logger composition | `src/eyenet/logging_utils.py` | `build_loggers(cfg, out)` — **moved here from `scripts/train.py`** (which re-exports the name) so `train.py` and `hpo.py` share it without a `scripts`-as-package shim. Behavior identical to F-WANDB's. |
+| Search | `src/eyenet/hpo.py` | `suggest_params(trial, search_space)`, `build_sampler(cfg)`, `build_pruner(cfg)`, `build_loggers_for_trial(cfg, out, n)`, `build_objective(cfg, bundle, datamodule)`, `PruningCallback(trial, monitor)` |
+| Study driver | `scripts/tune.py` | `main(config_path) -> optuna.Study`; CLI `py scripts/tune.py --config configs/optuna.yaml` |
+| Search config | `configs/optuna.yaml` | `data`/`model`/`trainer`/`output`/`logging` (same schema as `baseline.yaml`) plus the `optuna:` block |
+
+**Model signature changes (additive, backward-compatible):**
+- `GazeResNet18(pretrained, hidden_dim, dropout, dropout1=None, dropout2=None)` — the two head dropouts are independent. `dropout` is a **shim**: alone it fills both (exact R2 behavior); explicit `dropout1`/`dropout2` win per-layer.
+- `GazeEstimationModule(..., dropout1=None, dropout2=None, loss="angular")` — same shim, plus config-selected loss resolved through `get_loss` **at construction** (a bad name fails fast, not mid-run). R2-era checkpoints, which stored only `dropout`, still load.
+
+### Pruning callback — why `optuna-integration` is not a dependency
+
+`optuna_integration.PyTorchLightningPruningCallback` subclasses `lightning.pytorch.Callback` — the standalone **`lightning`** distribution, a different import root from this repo's **`pytorch_lightning`**. Installing it would place two Callback/Trainer hierarchies in one environment, and `pl.Trainer` rejects the foreign base class (`ImportError: Tried to import 'lightning'`). `hpo.PruningCallback` reimplements the ~10-line single-process logic against the Lightning this repo uses: report `objective_metric` to the trial each validation epoch, `raise optuna.TrialPruned()` when `should_prune()`, and **skip Lightning's pre-epoch-0 sanity-check validation pass** (reporting there would double-report step 0 and skew the pruner). DDP is out of scope, so the integration's distributed branch is not reproduced.
+
+### F-OPTUNA config schema (`optuna:` block)
+
+```yaml
+optuna:
+  study_name: eyenet-hpo
+  storage: null            # null => in-memory, fresh each run;
+                           # sqlite:///runs/hpo/study.db => persistent, resumes (load_if_exists)
+  direction: minimize
+  objective_metric: val/angular_error_deg   # degrees: comparable across losses
+  n_trials: 30
+  timeout: null
+  sampler: {name: tpe, seed: 42}            # tpe | random
+  pruner:  {name: median, n_warmup_steps: 1, n_startup_trials: 5}   # median | asha | none
+  search_space:            # entirely config-driven; drop a key to drop the dimension
+    dropout1:     {type: float, low: 0.0, high: 0.7}
+    dropout2:     {type: float, low: 0.0, high: 0.7}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-2, log: true}
+    hidden_dim:   {type: categorical, choices: [128, 256]}
+    loss:         {type: categorical, choices: [angular, cosine]}
+```
+
+`search_space` types are `float`/`int`/`categorical`; a searched key overrides the `model:` block's fixed value for that trial, and removing it falls back to `model:` with no code change. Empty/absent `search_space` is a `ValueError` — a search with nothing to search is a config error, not a silent single-config run.
+
+### Run artifacts (F-OPTUNA)
+
+| Path | Content |
+|---|---|
+| `<output.dir>/best_params.yaml` | `study_name`, `best_value`, `best_trial_number`, `best_params` — **the handoff**: paste `best_params` into a `configs/*.yaml` `model:` block for R3's full run. Written whenever ≥1 trial completed; skipped with a warning if none did. |
+| `<output.dir>/csv/version_*/metrics.csv` | Per-trial metric history (CSVLogger, unchanged) |
+| `<output.dir>/wandb/` | Per-trial W&B runs (named `{base}-t{n}`), only when enabled + key present |
+
+F-OPTUNA writes **no** `exp_key`-keyed artifact — its output is hyperparameters, not predictions — so Mission.md §3's positional-coupling rule still binds at R4, not here.
 
 ### Run artifacts (F-WANDB addition)
 

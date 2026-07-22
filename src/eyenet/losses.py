@@ -41,3 +41,27 @@ def angular_error_degrees(pred, target):
     """(B,3), (B,3) -> (B,) float32. Per-sample angle, degrees."""
     _check(pred, target)
     return torch.arccos(_cos(pred, target)) * (180.0 / math.pi)
+
+
+def cosine_loss(pred, target):
+    """(B,3), (B,3) -> scalar float32. Mean (1 - normalized dot). Range [0, 2].
+
+    No EPS clamp: unlike angular_loss this never calls arccos, so its gradient
+    (-t on the normalized dot) is finite everywhere. The clamp in _cos exists
+    only to tame arccos' divergence and is deliberately not reused here.
+    """
+    _check(pred, target)
+    p = F.normalize(pred.float(), p=2, dim=-1, eps=1e-8)
+    t = F.normalize(target.float(), p=2, dim=-1, eps=1e-8)
+    return (1.0 - (p * t).sum(dim=-1)).mean()
+
+
+_LOSSES = {"angular": angular_loss, "cosine": cosine_loss}
+
+
+def get_loss(name):
+    """Resolve a config loss name to its callable. Single source of truth."""
+    try:
+        return _LOSSES[name]
+    except KeyError:
+        raise ValueError(f"unknown loss {name!r}; valid: {sorted(_LOSSES)}") from None

@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from eyenet.losses import EPS, angular_error_degrees, angular_loss
+from eyenet.losses import EPS, angular_error_degrees, angular_loss, cosine_loss, get_loss
 
 SQRT3_2 = math.sqrt(3.0) / 2.0
 
@@ -139,3 +139,64 @@ def test_shape_mismatch_raises_naming_both_shapes():
 def test_error_paths_apply_to_degrees_too():
     with pytest.raises(ValueError, match=r"\(B, 3\)"):
         angular_error_degrees(torch.zeros(3), torch.zeros(3))
+
+
+# --- F-OPTUNA: cosine loss (Group 1) ---
+
+
+def _random_unit(n=8, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    return torch.nn.functional.normalize(torch.randn(n, 3, generator=g), p=2, dim=1)
+
+
+def test_cosine_loss_is_zero_at_perfect_agreement():
+    p = _random_unit()
+    assert cosine_loss(p, p).item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_cosine_loss_is_two_at_antipodal():
+    p = _random_unit(seed=1)
+    assert cosine_loss(p, -p).item() == pytest.approx(2.0, abs=1e-6)
+
+
+def test_cosine_loss_orthogonal_is_one_hand_computed():
+    pred = torch.tensor([[1.0, 0.0, 0.0]])
+    target = torch.tensor([[0.0, 1.0, 0.0]])
+    assert cosine_loss(pred, target).item() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_cosine_loss_is_scale_invariant():
+    """The internal F.normalize makes prediction magnitude irrelevant."""
+    p, t = _random_unit(seed=2), _random_unit(seed=3)
+    assert cosine_loss(2.0 * p, t).item() == pytest.approx(cosine_loss(p, t).item(), abs=1e-6)
+
+
+def test_cosine_loss_enforces_the_shared_shape_guard():
+    with pytest.raises(ValueError, match=r"\(B, 3\)"):
+        cosine_loss(torch.zeros(2, 2), torch.zeros(2, 2))
+    with pytest.raises(ValueError):
+        cosine_loss(torch.zeros(2, 3), torch.zeros(3, 3))
+
+
+def test_cosine_loss_gradient_is_finite_at_perfect_agreement():
+    """FR1's no-clamp claim: cosine_loss never calls arccos, so cos=1 is not a
+    singularity for it -- unlike angular_loss, which needs the EPS clamp there."""
+    target = _random_unit(seed=4)
+    pred = target.clone().requires_grad_()
+    cosine_loss(pred, target).backward()
+    assert torch.isfinite(pred.grad).all()
+
+
+# --- F-OPTUNA: loss resolver (Group 2) ---
+
+
+def test_get_loss_resolves_both_names():
+    assert get_loss("angular") is angular_loss
+    assert get_loss("cosine") is cosine_loss
+
+
+def test_get_loss_unknown_name_raises_listing_valid_keys():
+    with pytest.raises(ValueError) as excinfo:
+        get_loss("mse")
+    message = str(excinfo.value)
+    assert "angular" in message and "cosine" in message

@@ -1,0 +1,48 @@
+# F-OPTUNA hyperparameter search. Produces the settings R3's full-split run
+# uses; it does not train the final model.
+#
+# Per-trial cost is capped by trainer.limit_*_batches only -- R1's subject-level
+# split is untouched and one DataModule is shared across every trial.
+data:
+  bundle_dir: ../eve_shared/EveDataset/bundle
+  crops_root: ../eve_shared/EveDataset/eve_out
+  batch_size: 32
+  num_workers: 4
+  split_source:
+    seed: 42
+    val_fraction: 0.2
+model:                     # fixed base; search_space keys override per trial
+  pretrained: true
+  lr: 1.0e-4
+trainer:                   # passed through to pl.Trainer(**trainer)
+  max_epochs: 5            # enough epochs for the pruner to discriminate
+  limit_train_batches: 100
+  limit_val_batches: 20
+  accelerator: auto
+  log_every_n_steps: 5
+  enable_checkpointing: false   # throwaway subset trials produce no artifacts
+output:
+  dir: runs/hpo
+logging:
+  wandb:
+    enabled: false
+    project: eyenet
+    entity: null
+    run_name: null       # null => study_name; each trial appends -t{n}
+    tags: []
+optuna:
+  study_name: eyenet-hpo
+  storage: null          # null => in-memory (fresh each run);
+                         # sqlite:///runs/hpo/study.db => persistent, resumes
+  direction: minimize
+  objective_metric: val/angular_error_deg   # degrees: comparable across losses
+  n_trials: 30
+  timeout: null          # seconds; null => bounded by n_trials alone
+  sampler: {name: tpe, seed: 42}
+  pruner: {name: median, n_warmup_steps: 1, n_startup_trials: 5}
+  search_space:
+    dropout1:     {type: float, low: 0.0, high: 0.5}
+    dropout2:     {type: float, low: 0.0, high: 0.5}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-2, log: true}
+    hidden_dim:   {type: categorical, choices: [128, 256]}
+    loss:         {type: categorical, choices: [angular, cosine]}

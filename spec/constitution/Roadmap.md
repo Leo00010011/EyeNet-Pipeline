@@ -146,9 +146,40 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 
 ⚠️ **Data Validity checklist (real W&B dashboard run against a live account) not executed in this session** — no `WANDB_API_KEY` available in this environment. All code-correctness checks (Groups 1–6 of `validation.md`) pass; the `metrics.csv` cross-check (`test_new_metrics_reach_csv`) confirms the new columns reach a logger, which is the offline proof that `WandbLogger` would receive the identical `self.log` calls. The live-dashboard checks (co-plotted chart, W&B/CSV agreement, offline-mode sync, unattended job dry-run) remain open and should be run once a `WANDB_API_KEY` is available, before R3's full-split run.
 
+## F-OPTUNA — Optuna hyperparameter search ✓ DONE
+
+**Motivation:** R3's full-split run needs head/optimizer/loss settings chosen, not hand-tuned. F-OPTUNA is the cheap search that *produces* those settings; it does **not** replace R3's full run.
+
+**Objective is loss-invariant.** The search treats the loss function itself as a dimension, so raw training loss is not comparable across trials (arccos radians vs. `1-cos`). Every trial is scored on `val/angular_error_deg` — the project's primary metric, computed identically regardless of what a trial trained under. Pointing the study at `val/loss` would silently make the two loss branches incomparable; `tests/test_tune_script.py` pins the metric string against that regression.
+
+**Per-trial cheapness comes from `limit_*_batches`, never from re-splitting.** One `EyeGazeDataModule` is built in `main` and shared across every trial, so the data is byte-identical trial-to-trial and R1's subject-level split policy is untouched. Pinned by `test_study_reuses_one_datamodule_across_trials` (asserts one datamodule `id()` across all trials). No F-OPTUNA code imports `build_sample_index` or `assign_splits`.
+
+**Implemented:**
+- `cosine_loss` + `get_loss(name)` (`src/eyenet/losses.py`) — `1 - ⟨x,x̂⟩` over normalized rows, range `[0,2]`, reusing the existing `_check` guard. **No `EPS` clamp, deliberately**: it never calls `arccos`, so its gradient is finite even at perfect agreement — the opposite of `angular_loss`, which *needs* the clamp. Both behaviors are pinned by tests. `get_loss` is the single source of truth for the `loss` config value.
+- **Independent head dropouts** (`src/eyenet/model.py`) — `dropout1`/`dropout2` with `dropout` retained as a shim: `dropout` alone fills both (exact R2 behavior), explicit values win per-layer.
+- `GazeEstimationModule` (`src/eyenet/lightning_module.py`) — gains `dropout1`/`dropout2`/`loss`; `_step` calls `self._loss_fn` instead of a hardcoded `angular_loss`, while `angular_error_degrees` is untouched (FR3). Bad loss names raise **at construction**, not hours into a run. R2-era checkpoints (which stored only `dropout`) still load.
+- `src/eyenet/hpo.py` — `suggest_params` (config-driven typed dispatch; the searched dimensions are entirely config-defined, so removing a `search_space` key drops it from the search with no code change), `build_sampler`, `build_pruner`, `build_loggers_for_trial`, `build_objective`.
+- `src/eyenet/logging_utils.py` — `build_loggers` moved out of `scripts/train.py` (which re-exports the name, keeping the F-WANDB tests green) so both entrypoints import it without a `scripts`-as-package shim. F-WANDB's degrade-graceful contract is inherited verbatim; the only addition is the per-trial `-t{n}` run-name suffix.
+- `scripts/tune.py` — `main(config_path) -> optuna.Study`; same fail-fast path guard as `train.py`, `catch=(RuntimeError,)` so one OOM costs one trial rather than the study, and `best_params.yaml` written whenever ≥1 trial completed.
+- `configs/optuna.yaml`, `requirements.txt` (`optuna`).
+
+⚠️ **Spec correction — `optuna-integration` is NOT a dependency.** The plan (FR14) called for `optuna.integration.PyTorchLightningPruningCallback`. That class subclasses `lightning.pytorch.Callback` — the standalone `lightning` distribution, a **different import root** from this repo's `pytorch_lightning`. Installing it puts two Callback/Trainer hierarchies in one environment and `pl.Trainer` rejects the foreign base class outright (`ImportError: Tried to import 'lightning'`, hit on the first real trial). The single-process logic is ~10 lines, so `PruningCallback` in `src/eyenet/hpo.py` reimplements it against the Lightning this repo actually uses, including the sanity-check-pass guard that would otherwise double-report step 0. DDP is explicitly out of scope, so the integration's distributed branch is deliberately not reproduced.
+
+**Tests:** 48 new — `tests/test_losses.py` +8, `tests/test_model.py` +4, `tests/test_lightning_module.py` +5, `tests/test_hpo.py` 18 (new; incl. 4 pinning the reimplemented `PruningCallback`), `tests/test_tune_script.py` 13 (new; real 2-trial studies on the sample bundle, offline). Full suite: **202 passed, 1 pre-existing skip, zero regressions**. `angular_loss`, `angular_error_degrees`, `EPS`, `_cos`, and `model.forward`'s normalization are unchanged (verified by diff).
+
+**Data-validity checks — all PASS** (`notebooks/inspect_optuna_search.ipynb`, 12-trial study, executed via nbconvert, outputs persisted):
+  1. Objective **moves**: 6 completed trials, mean 10.7°, **std 11.0°** — the searched dimensions genuinely reach the model (a flat objective would mean inert wiring).
+  2. Pruning is **live**: 6/12 trials PRUNED — not a silent no-op training every trial to completion.
+  3. `best_params` inside declared bounds for every float dim and within `choices` for both categoricals.
+  4. Both loss branches reachable: 9 `angular` / 3 `cosine` sampled.
+  5. **Handoff works**: `best_params.yaml` pasted into a `model:` block is accepted by `scripts/train.py`'s `main` without error.
+
+⚠️ **The notebook's angular-error values are not results** — 3 epochs × 3 batches per trial. They demonstrate the search *machinery*, nothing about model quality. Producing R3's actual tuned settings means running `py scripts/tune.py --config configs/optuna.yaml` at the shipped budget.
+
 ## R3 — Full Training & Evaluation
 
 - Full-split training run (after F-WANDB — the ablation questions need cross-run comparison).
+- **Use F-OPTUNA's `best_params.yaml`** to seed the run's `model:` block rather than hand-tuning (run the search at the shipped `configs/optuna.yaml` budget first — the recorded notebook study is a machinery check, not a tuning result).
 - Evaluation against published appearance-based gaze estimation baselines (angular error) to sanity-check the pipeline isn't silently biased (mirrors EveDataset's COCO FreeView cross-check philosophy). ⚠️ Report the **mean-gaze prior's score alongside** the model's for scale (see the R2 note) — on EVE's mean-biased labels a raw ≈5° figure is not comparable to a published ≈5° figure.
 - Re-check `theta` (vertical) correlation on the full run — R2's subset left it at r ≈ 0.
 - Ablations as needed (left/right shared vs. separate, augmentation choices) — scope TBD based on R2 results.
