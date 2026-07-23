@@ -120,6 +120,56 @@ def test_configure_optimizers_is_adam_with_configured_lr():
     assert opt.param_groups[0]["lr"] == 3e-4
 
 
+def test_no_lr_schedule_returns_bare_optimizer():
+    # R2 contract: absent lr_schedule must not wrap the optimizer in a dict.
+    assert isinstance(module(lr=3e-4).configure_optimizers(), torch.optim.Optimizer)
+
+
+def test_lr_schedule_phase_factors_and_hold():
+    cfg = module(lr=1e-4, lr_schedule=[[3, 1.0e-3], [5, 1.0e-4]]).configure_optimizers()
+    # The schedule steps per epoch, not per batch -- that is the intended unit.
+    assert cfg["lr_scheduler"]["interval"] == "epoch"
+    lam = cfg["lr_scheduler"]["scheduler"].lr_lambdas[0]
+    base = 1e-4
+    # epochs 0-2 => 1e-3, epochs 3-7 => 1e-4, then the last phase is held
+    for epoch in range(3):
+        assert math.isclose(lam(epoch) * base, 1e-3, rel_tol=1e-9)
+    for epoch in range(3, 8):
+        assert math.isclose(lam(epoch) * base, 1e-4, rel_tol=1e-9)
+    for epoch in (8, 50, 10_000):
+        assert math.isclose(lam(epoch) * base, 1e-4, rel_tol=1e-9)
+
+
+def test_lr_schedule_drives_actual_optimizer_lr_over_a_run():
+    m = module(lr=1e-4, lr_schedule=[[3, 1.0e-3], [5, 1.0e-4]])
+    seen = []
+
+    class RecordLR(pl.Callback):
+        def on_train_epoch_start(self, trainer, pl_module):
+            seen.append(trainer.optimizers[0].param_groups[0]["lr"])
+
+    image, target = synthetic_batch(n=4)
+    loader = DataLoader(TensorDataset(image, target), batch_size=4)
+    pl.Trainer(
+        max_epochs=9, logger=False, enable_checkpointing=False,
+        enable_progress_bar=False, enable_model_summary=False,
+        accelerator="cpu", callbacks=[RecordLR()],
+    ).fit(m, loader)
+    # LR must be constant within an epoch and change only at the boundary.
+    assert [round(v, 10) for v in seen] == [1e-3] * 3 + [1e-4] * 6
+
+
+def test_lr_schedule_step_interval_and_bad_interval():
+    cfg = module(lr=1e-4, lr_schedule=[[1, 1e-3]], lr_schedule_interval="step").configure_optimizers()
+    assert cfg["lr_scheduler"]["interval"] == "step"
+    import pytest
+
+    with pytest.raises(ValueError):
+        module(lr=1e-4, lr_schedule=[[1, 1e-3]], lr_schedule_interval="batch").configure_optimizers()
+    with pytest.raises(ValueError):
+        module(lr=0.0, lr_schedule=[[1, 1e-3]]).configure_optimizers()
+
+
 def test_save_hyperparameters_records_constructor_args():
     m = module(lr=3e-4, weight_decay=1e-5)
     assert m.hparams.lr == 3e-4

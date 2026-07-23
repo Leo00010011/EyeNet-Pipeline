@@ -16,6 +16,12 @@ model:
   weight_decay: 0.0
   hidden_dim: 256
   dropout: 0.5
+  # Piecewise-constant LR: [n_epochs, lr] per phase; the last phase's LR is held
+  # for the remaining epochs. Factors are relative to model.lr above, so lr != 0.
+  lr_schedule_interval: epoch
+  lr_schedule:
+    - [3, 1.0e-3]
+    - [5, 1.0e-4]
 trainer:                    # passed through to pl.Trainer(**trainer) -- no limit_*,
   max_epochs: 20             # this is a real run, not R2's subset smoke test
   accelerator: auto

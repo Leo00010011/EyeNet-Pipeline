@@ -27,6 +27,8 @@ class GazeEstimationModule(pl.LightningModule):
         dropout1: float | None = None,
         dropout2: float | None = None,
         loss: str = "angular",
+        lr_schedule: list | None = None,
+        lr_schedule_interval: str = "epoch",
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -143,8 +145,43 @@ class GazeEstimationModule(pl.LightningModule):
         self.log("test/angular_error_deg", per_sample_deg.mean(), on_epoch=True)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
+        opt = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
         )
+        phases = self.hparams.lr_schedule
+        if not phases:
+            return opt  # R2 behavior: bare optimizer, no scheduler
+
+        # phases: [[n_epochs, lr], ...] -- piecewise-constant LR. The last phase's
+        # LR is held for the rest of the run. LambdaLR multiplies the optimizer's
+        # base LR, so every factor is phase_lr / hparams.lr and hparams.lr must be
+        # non-zero for the schedule to have any effect.
+        base = float(self.hparams.lr)
+        if base == 0.0:
+            raise ValueError("lr must be non-zero when lr_schedule is set")
+        boundaries, factors = [], []
+        cum = 0
+        for n_units, phase_lr in phases:
+            cum += int(n_units)
+            boundaries.append(cum)
+            factors.append(float(phase_lr) / base)
+
+        def lr_lambda(step: int) -> float:
+            for boundary, factor in zip(boundaries, factors):
+                if step < boundary:
+                    return factor
+            return factors[-1]  # hold the final phase's LR
+
+        interval = self.hparams.lr_schedule_interval
+        if interval not in ("step", "epoch"):
+            raise ValueError(f"lr_schedule_interval must be 'step' or 'epoch', got {interval!r}")
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda),
+                "interval": interval,
+                "frequency": 1,
+            },
+        }

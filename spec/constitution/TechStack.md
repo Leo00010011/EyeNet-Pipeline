@@ -28,6 +28,8 @@ Relevant accessor surface consumed here (see EveDataset's `TechStack.md` for ful
 | Image normalization | ImageNet convention: scale to `[0,1]`, then `mean=[0.485,0.456,0.406]`, `std=[0.229,0.224,0.225]` |
 | Regression head | `Linear(512,hidden_dim) → Dropout(dropout1) → Linear(hidden_dim,3) → Dropout(dropout2)` on ResNet18 backbone → 3-vector, L2-normalized to unit length. `hidden_dim` (default 256) is config-adjustable; the two dropouts are independent (F-OPTUNA), with `dropout` (default 0.5) retained as a shim filling both. |
 | Loss | Config-selectable via `losses.get_loss`: `angular` (arccos, radians — default) or `cosine` (`1 - ⟨x,x̂⟩`). Both over unit vectors. |
+| Optimizer | `AdamW`, `lr`/`weight_decay` from the `model:` block |
+| LR schedule | Optional piecewise-constant `LambdaLR` (F-LR-SCHED), config-driven via `model.lr_schedule`. Absent ⇒ constant LR, exactly the pre-F-LR-SCHED behavior. |
 | Hyperparameter search | Optuna (F-OPTUNA), `scripts/tune.py` + `configs/optuna.yaml`; objective is `val/angular_error_deg` |
 | Target derivation | EveDataset spherical `(theta, phi)` → 3D unit vector via MPIIGaze convention: `g = [-cos(theta)sin(phi), -sin(theta), -cos(theta)cos(phi)]` |
 | Primary metric | Mean angular error (degrees) |
@@ -245,6 +247,36 @@ logging:
 **Model signature changes (additive, backward-compatible):**
 - `GazeResNet18(pretrained, hidden_dim, dropout, dropout1=None, dropout2=None)` — the two head dropouts are independent. `dropout` is a **shim**: alone it fills both (exact R2 behavior); explicit `dropout1`/`dropout2` win per-layer.
 - `GazeEstimationModule(..., dropout1=None, dropout2=None, loss="angular")` — same shim, plus config-selected loss resolved through `get_loss` **at construction** (a bad name fails fast, not mid-run). R2-era checkpoints, which stored only `dropout`, still load.
+
+## Piecewise-constant LR schedule (F-LR-SCHED)
+
+`GazeEstimationModule(..., lr_schedule=None, lr_schedule_interval="epoch")` — additive and
+backward-compatible: with `lr_schedule` absent or empty, `configure_optimizers` returns the **bare
+`AdamW`** exactly as before (pinned by `test_no_lr_schedule_returns_bare_optimizer`), so R2/F-OPTUNA
+checkpoints and configs are unaffected and F-OPTUNA's trials keep their single fixed `lr`.
+
+`lr_schedule` is a list of `[n_units, lr]` phases. Implemented as a `LambdaLR` whose factor is
+`phase_lr / model.lr`, so **`model.lr` is the base the whole schedule is relative to and must be
+non-zero** — a zero base would scale every phase to zero, so it raises at `configure_optimizers`
+rather than silently training at LR 0. The **last phase's LR is held** for the remainder of the run;
+the schedule does not need to cover `max_epochs`.
+
+`lr_schedule_interval` is `"epoch"` (default) or `"step"`; anything else raises. **The default is
+epoch on purpose** — per-batch LR changes are not the intended unit, and a phase list written in
+epochs but interpreted as optimizer steps would expire within the first few seconds of a real run.
+
+```yaml
+model:
+  lr: 1.0e-4               # base; every phase factor is phase_lr / lr
+  lr_schedule_interval: epoch
+  lr_schedule:
+    - [3, 1.0e-3]          # epochs 0-2
+    - [5, 1.0e-4]          # epochs 3-7, then held to the end of the run
+```
+
+Shipped in `configs/cluster_run.yaml.template` (the R3 full run). `configs/baseline.yaml` and
+`configs/optuna.yaml` deliberately do **not** set it — the baseline is a 2-epoch correctness smoke
+test and the search tunes a constant `lr`.
 
 ### Pruning callback — why `optuna-integration` is not a dependency
 

@@ -77,7 +77,7 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 
 - [x] **Angular loss** (`src/eyenet/losses.py`) — `angular_loss` (mean arccos of the clamped normalized dot, radians, differentiable) and `angular_error_degrees` (per-sample `(B,)`, degrees). Both normalize their inputs internally (`eps=1e-8`), so they are correct in isolation and testable without a model. `EPS = 1e-7` clamps `cos` to `[-1+EPS, 1-EPS]` in a single shared code path (`_cos`) — **load-bearing, not cosmetic**: `d/dx arccos` diverges at `cos = ±1`, which float32 reaches *before* the model is actually perfect, and an unclamped `arccos` would emit NaN gradients that silently poison every weight while the run still "trains" to completion. Loss floor is `arccos(1-1e-7) ≈ 0.026°`, far below any claimable angular error.
 - [x] **ResNet18 + regression head** (`src/eyenet/model.py`) — `GazeResNet18(pretrained=True, hidden_dim=256, dropout=0.5)`: `resnet18` backbone, `fc` replaced with `Linear(512, hidden_dim) → Dropout(dropout) → Linear(hidden_dim, 3) → Dropout(dropout)`, output `F.normalize(..., eps=1e-8)` to unit length. `hidden_dim`/`dropout` are config-adjustable (plumbed through `GazeEstimationModule` and `configs/*.yaml`'s `model:` block). No input resize — `AdaptiveAvgPool2d` handles 128×128 natively and F-NORM's framing must not be discarded. `pretrained=False` exists so the test suite is offline-deterministic.
-- [x] **Lightning module** (`src/eyenet/lightning_module.py`) — `GazeEstimationModule(pretrained, lr, weight_decay)`: logs `train/loss`, `val/loss`, `val/angular_error_deg`, `test/angular_error_deg`; Adam, no scheduler. Consumes `batch[0], batch[1]` only — the R1 batch's `(exp_key, frame, patch)` metadata passes through untouched as R4's export key. **Never touches `EveBundle`**, so its tests run on synthetic batches with no fixture.
+- [x] **Lightning module** (`src/eyenet/lightning_module.py`) — `GazeEstimationModule(pretrained, lr, weight_decay)`: logs `train/loss`, `val/loss`, `val/angular_error_deg`, `test/angular_error_deg`; Adam, no scheduler *(both since superseded: AdamW, and an optional LR schedule — see F-LR-SCHED)*. Consumes `batch[0], batch[1]` only — the R1 batch's `(exp_key, frame, patch)` metadata passes through untouched as R4's export key. **Never touches `EveBundle`**, so its tests run on synthetic batches with no fixture.
 - [x] **Training script + config** (`scripts/train.py`, `configs/baseline.yaml`) — YAML-driven; the `trainer:` block is passed through to `pl.Trainer` unmodified, which is how the baseline run is scoped to a small subset (`limit_train_batches`/`limit_val_batches`) **without touching R1's subject-level split policy**. Bad `bundle_dir`/`crops_root` raise `FileNotFoundError` before the Trainer is built. `main(config_path)` is importable so tests drive it without a subprocess.
 - [x] **Baseline run validated end-to-end** (`runs/baseline`, 2 epochs × 50 batches) — train loss 1.03 → 0.08 rad, zero NaNs, checkpoints save/load, predictions unit-norm on real data, F-FLIP convention intact. Evidence: `notebooks/inspect_r2_training.ipynb` (executed, outputs persisted).
 
@@ -177,6 +177,37 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
 ⚠️ **Spec correction — a per-trial `WandbLogger` does not give a per-trial W&B run.** Found while reviewing the cluster job before R3's search. `WandbLogger.experiment` reuses a non-None process-global `wandb.run` rather than starting a new one, and `WandbLogger.finalize()` never calls `wandb.finish()` — so all 30 trials of a cluster study logged into trial 0's run, with the computed `-t1`…`-t29` names discarded. Fixed by `logging_utils.finish_wandb_run()` + the `hpo.trial_loggers` context manager (see TechStack §One W&B run per trial), which closes the run on every trial exit path including prune and OOM. `build_loggers_for_trial` also now tags each run with the `study_name`. CSVLogger was never affected (`csv/version_N` auto-increments per trial) and remains the offline record. Tests: `tests/test_tune_script.py` Group 8, 8 new — all against a fake `wandb` module, nothing touches the network. ⚠️ The **live** offline-mode check (`WANDB_MODE=offline`, 3 trials ⇒ three `offline-run-*` dirs under `<output.dir>/wandb/`) is **not executed** — `wandb` is not installed in the dev environment; run it on the cluster node before the real search.
 
 ⚠️ **The notebook's angular-error values are not results** — 3 epochs × 3 batches per trial. They demonstrate the search *machinery*, nothing about model quality. Producing R3's actual tuned settings means running `py scripts/tune.py --config configs/optuna.yaml` at the shipped budget.
+
+## F-LR-SCHED — Piecewise-constant learning-rate schedule ✓ DONE
+
+**Motivation:** R3's full run trains for 20 epochs at a single constant LR. A short high-LR phase
+followed by a drop is the cheapest way to let the head move early without the backbone being
+disturbed late. This is a training-loop change only — no model, loss, split, or data-pipeline change.
+
+**Implemented:**
+- `GazeEstimationModule(..., lr_schedule=None, lr_schedule_interval="epoch")`
+  (`src/eyenet/lightning_module.py`) — `configure_optimizers` returns a `LambdaLR` phase schedule
+  when `lr_schedule` is set, and the **bare optimizer** (byte-identical prior behavior) when it is
+  not. Factors are `phase_lr / model.lr`, the final phase is held to the end of the run, and both
+  a zero base `lr` and an unrecognized interval raise at `configure_optimizers` rather than
+  degrading silently. Full schema and rationale in TechStack §Piecewise-constant LR schedule.
+- `configs/cluster_run.yaml.template` — the R3 run gets `[[3, 1e-3], [5, 1e-4]]` on the `epoch`
+  interval. `configs/baseline.yaml` and `configs/optuna.yaml` intentionally left unscheduled.
+
+⚠️ **Epochs, not optimizer steps.** The first implementation defaulted the interval to `step`;
+corrected to `epoch`. A phase list authored in epochs but applied per batch expires within the first
+seconds of a real run and looks like a working schedule in the logs — `lr_schedule_interval` is
+explicit in the template for exactly this reason.
+
+**Tests:** 4 new (`tests/test_lightning_module.py`) — the no-schedule bare-optimizer contract, the
+per-phase factors + hold-past-the-end behavior, a real 9-epoch Lightning fit recording
+`optimizers[0].param_groups[0]["lr"]` at each epoch start (asserts `[1e-3]*3 + [1e-4]*6`, which also
+pins that the LR is constant *within* an epoch), and the `step`-interval + both error paths. Full
+suite: **214 passed, 1 pre-existing skip, zero regressions.**
+
+⚠️ **Not yet a result** — the schedule has not been run at full length on the cluster. Whether the
+1e-3 phase actually helps over R3's constant 1e-4 is an open question for the R3 run, not a
+settled one.
 
 ## R3 — Full Training & Evaluation
 
