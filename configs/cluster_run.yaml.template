@@ -39,4 +39,4 @@ logging:
     project: eyenet
     entity: null
     run_name: cluster_run_${RUN_DATETIME}
-    tags: []
+    tags: ["whole_train"]
