@@ -5,17 +5,22 @@
 data:
   bundle_dir: ${LOCAL_SCRATCH}/data/bundle
   crops_root: ${LOCAL_SCRATCH}/data/bundle
-  batch_size: 128
+  batch_size: 32
   num_workers: 2            # matches #SBATCH --cpus-per-task
   split_source:
     seed: 42
     val_fraction: 0.2
 model:
   pretrained: true
-  lr: 1.0e-4
-  weight_decay: 0.0
+  lr: 1.0e-3
+  weight_decay: 0.000319
   hidden_dim: 256
-  dropout: 0.5
+  # Independent head dropouts (F-OPTUNA). These supersede the older single
+  # `dropout` shim -- do not set `dropout` alongside them, or the config will
+  # record a value the model never uses.
+  dropout1: 0.27224
+  dropout2: 0.41977
+  loss: angular             # angular (arccos, radians) | cosine (1 - <x,x^>)
   # Piecewise-constant LR: [n_epochs, lr] per phase; the last phase's LR is held
   # for the remaining epochs. Factors are relative to model.lr above, so lr != 0.
   lr_schedule_interval: epoch
