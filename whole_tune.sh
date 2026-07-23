@@ -1,12 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=whole_tune
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=16
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
 #SBATCH --time=16:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=leonardo.ulloa@rai.usc.gal
 
+
+# Without this, a failed `conda activate` or a crashed tune.py is silently
+# ignored and the script goes on to cat a best_params.yaml that never existed.
+set -euo pipefail
 
 echo "Starting hpo at: $(date)"
 
@@ -39,6 +41,9 @@ source /mnt/beegfs/home/leonardo.ulloa/miniconda3/etc/profile.d/conda.sh
 
 echo "Activating Conda env"
 conda activate scanpath
+# Guard against a silently-failed activation leaving us on base's python.
+echo "Using python: $(which python)"
+python -c "import optuna, torch; print('optuna', optuna.__version__)"
 
 echo "Moving to project"
 cd projects/EyeNet-Pipeline/

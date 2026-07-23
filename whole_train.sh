@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=whole_train
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=16
+#SBATCH --mem=16G
 #SBATCH --time=16:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --mail-type=BEGIN,END,FAIL
