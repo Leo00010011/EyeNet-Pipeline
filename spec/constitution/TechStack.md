@@ -237,8 +237,8 @@ logging:
 | Module | Location | Surface |
 |---|---|---|
 | Loss additions | `src/eyenet/losses.py` | `cosine_loss(pred, target)` → scalar, `1 - ⟨x,x̂⟩` meaned, range `[0,2]`; `get_loss(name)` → callable, `{"angular", "cosine"}`, `ValueError` otherwise. **Single source of truth for the `loss` config value** — no other module maps loss names. |
-| Logger composition | `src/eyenet/logging_utils.py` | `build_loggers(cfg, out)` — **moved here from `scripts/train.py`** (which re-exports the name) so `train.py` and `hpo.py` share it without a `scripts`-as-package shim. Behavior identical to F-WANDB's. |
-| Search | `src/eyenet/hpo.py` | `suggest_params(trial, search_space)`, `build_sampler(cfg)`, `build_pruner(cfg)`, `build_loggers_for_trial(cfg, out, n)`, `build_objective(cfg, bundle, datamodule)`, `PruningCallback(trial, monitor)` |
+| Logger composition | `src/eyenet/logging_utils.py` | `build_loggers(cfg, out)` — **moved here from `scripts/train.py`** (which re-exports the name) so `train.py` and `hpo.py` share it without a `scripts`-as-package shim. Behavior identical to F-WANDB's. Plus `finish_wandb_run()` — the symmetric close; see §One W&B run per trial. |
+| Search | `src/eyenet/hpo.py` | `suggest_params(trial, search_space)`, `build_sampler(cfg)`, `build_pruner(cfg)`, `build_loggers_for_trial(cfg, out, n)`, `trial_loggers(cfg, out, n)` (context manager), `build_objective(cfg, bundle, datamodule)`, `PruningCallback(trial, monitor)` |
 | Study driver | `scripts/tune.py` | `main(config_path) -> optuna.Study`; CLI `py scripts/tune.py --config configs/optuna.yaml` |
 | Search config | `configs/optuna.yaml` | `data`/`model`/`trainer`/`output`/`logging` (same schema as `baseline.yaml`) plus the `optuna:` block |
 
@@ -249,6 +249,26 @@ logging:
 ### Pruning callback — why `optuna-integration` is not a dependency
 
 `optuna_integration.PyTorchLightningPruningCallback` subclasses `lightning.pytorch.Callback` — the standalone **`lightning`** distribution, a different import root from this repo's **`pytorch_lightning`**. Installing it would place two Callback/Trainer hierarchies in one environment, and `pl.Trainer` rejects the foreign base class (`ImportError: Tried to import 'lightning'`). `hpo.PruningCallback` reimplements the ~10-line single-process logic against the Lightning this repo uses: report `objective_metric` to the trial each validation epoch, `raise optuna.TrialPruned()` when `should_prune()`, and **skip Lightning's pre-epoch-0 sanity-check validation pass** (reporting there would double-report step 0 and skew the pruner). DDP is out of scope, so the integration's distributed branch is not reproduced.
+
+### One W&B run per trial — `finish_wandb_run` is load-bearing
+
+`WandbLogger` is lazy: `wandb.init()` fires on first `.experiment` access, and that property
+first checks the **process-global `wandb.run`** — if it is non-None it *reuses* that run (warning
+only) instead of starting a new one. `WandbLogger.finalize()` uploads checkpoint artifacts and
+**never calls `wandb.finish()`**. So in a single-process study, a fresh per-trial `WandbLogger`
+is not enough: trial 0 opens the run and every later trial silently appends to it — interleaved
+curves, `trainer/global_step` resetting each trial, and one `hparams` config for N configurations.
+
+`logging_utils.finish_wandb_run()` closes the global run, and `hpo.trial_loggers` is the context
+manager that pairs it with `build_loggers_for_trial` so open and close cannot drift apart — the
+`finally` fires on a normal return, on `TrialPruned` (from `PruningCallback` or the missing-metric
+path), and on an OOM `RuntimeError`. It is keyed off `"wandb" in sys.modules` so the disabled path
+still never imports wandb (FR21), and it warns rather than raises (FR25).
+
+Per-trial hyperparameters need no extra plumbing — `GazeEstimationModule.save_hyperparameters()`
+puts each trial's sampled params in its own run's config once runs are separate.
+`build_loggers_for_trial` also appends the `study_name` to the run's `tags` (deduplicated), so
+one study's trials filter together in the W&B UI.
 
 ### F-OPTUNA config schema (`optuna:` block)
 

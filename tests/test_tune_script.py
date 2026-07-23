@@ -6,6 +6,7 @@ touches the network.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import optuna
@@ -13,6 +14,7 @@ import pytest
 import yaml
 from pytorch_lightning.loggers import CSVLogger
 
+from eyenet import logging_utils
 from eyenet.hpo import build_loggers_for_trial
 
 from conftest import FACE_CROPS_ROOT, SAMPLE_BUNDLE_DIR
@@ -246,3 +248,99 @@ def test_study_reuses_one_datamodule_across_trials(tmp_path, tune_module, monkey
     monkeypatch.setattr(tune_module, "build_objective", recording_build)
     tune_module.main(str(cfg_path))
     assert len(seen) == 2 and len(set(seen)) == 1
+
+
+# --- Group 8: one W&B run per trial ---
+#
+# WandbLogger.experiment reuses a non-None wandb.run instead of starting a new
+# one, and WandbLogger.finalize() never calls wandb.finish() -- so without an
+# explicit close between trials the whole study lands in trial 0's run. These
+# tests run entirely against a fake wandb module; the real package is never
+# imported or contacted.
+
+
+class _FakeWandb:
+    def __init__(self, run=object()):
+        self.run = run
+        self.finish_calls = 0
+
+    def finish(self):
+        self.finish_calls += 1
+        self.run = None
+
+
+def test_finish_wandb_run_is_noop_when_wandb_never_imported(monkeypatch):
+    """FR21: the disabled path must not drag wandb into the process."""
+    monkeypatch.delitem(sys.modules, "wandb", raising=False)
+    logging_utils.finish_wandb_run()
+    assert "wandb" not in sys.modules
+
+
+def test_finish_wandb_run_closes_an_open_run(monkeypatch):
+    fake = _FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    logging_utils.finish_wandb_run()
+    assert fake.finish_calls == 1
+
+
+def test_finish_wandb_run_does_nothing_when_no_run_is_open(monkeypatch):
+    fake = _FakeWandb(run=None)
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    logging_utils.finish_wandb_run()
+    assert fake.finish_calls == 0
+
+
+def test_finish_wandb_run_warns_instead_of_raising(monkeypatch):
+    """FR25: instrumentation must never cost a queued run."""
+    fake = _FakeWandb()
+    fake.finish = lambda: (_ for _ in ()).throw(RuntimeError("no network"))
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    with pytest.warns(UserWarning, match="could not close the W&B run"):
+        logging_utils.finish_wandb_run()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_trial_loggers_closes_the_run_on_every_exit_path(tmp_path, monkeypatch, raises):
+    """The regression pin: exactly one close per trial, pruned or completed."""
+    import eyenet.hpo as hpo
+
+    calls = []
+    monkeypatch.setattr(hpo, "finish_wandb_run", lambda: calls.append(1))
+    cfg = {"logging": {"wandb": {"enabled": False}}, "optuna": {"study_name": "s"}}
+
+    if raises:
+        with pytest.raises(optuna.TrialPruned):
+            with hpo.trial_loggers(cfg, tmp_path, 0):
+                raise optuna.TrialPruned()
+    else:
+        with hpo.trial_loggers(cfg, tmp_path, 0) as loggers:
+            assert isinstance(loggers[0], CSVLogger)
+
+    assert calls == [1]
+
+
+def test_study_name_is_added_to_run_tags(tmp_path, monkeypatch):
+    import eyenet.hpo as hpo
+
+    seen = {}
+    monkeypatch.setattr(hpo, "build_loggers", lambda cfg, out: seen.update(cfg) or [])
+
+    base_cfg = {"logging": {"wandb": {"enabled": True, "tags": ["hpo"]}},
+                "optuna": {"study_name": "eyenet-hpo-20260723"}}
+    hpo.build_loggers_for_trial(base_cfg, tmp_path, 4)
+    assert seen["logging"]["wandb"]["tags"] == ["hpo", "eyenet-hpo-20260723"]
+
+    # The caller's cfg must be untouched, else tags compound across trials.
+    assert base_cfg["logging"]["wandb"]["tags"] == ["hpo"]
+
+
+def test_study_tag_is_not_duplicated(tmp_path, monkeypatch):
+    import eyenet.hpo as hpo
+
+    seen = {}
+    monkeypatch.setattr(hpo, "build_loggers", lambda cfg, out: seen.update(cfg) or [])
+    hpo.build_loggers_for_trial(
+        {"logging": {"wandb": {"enabled": True, "tags": ["s"]}}, "optuna": {"study_name": "s"}},
+        tmp_path, 1,
+    )
+    assert seen["logging"]["wandb"]["tags"] == ["s"]

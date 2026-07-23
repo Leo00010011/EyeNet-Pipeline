@@ -12,6 +12,7 @@ policy is untouched and trials differ in hyperparameters alone.
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import optuna
 import pytorch_lightning as pl
 
 from eyenet.lightning_module import GazeEstimationModule
-from eyenet.logging_utils import build_loggers
+from eyenet.logging_utils import build_loggers, finish_wandb_run
 
 # Searched keys that overlay onto the `model:` block for GazeEstimationModule.
 MODEL_PARAM_KEYS = ("dropout1", "dropout2", "dropout", "hidden_dim", "loss", "weight_decay", "lr")
@@ -115,13 +116,34 @@ def build_loggers_for_trial(cfg: dict, out: Path, trial_number: int) -> list:
 
     Copies the nested logging block so the caller's cfg is never mutated across
     trials -- otherwise run names would compound (-t0-t1-t2...).
+
+    The study name is also added to the run's tags, so one study's trials filter
+    together in the W&B UI now that each trial is its own run.
     """
     logging_cfg = dict(cfg.get("logging") or {})
     wandb_cfg = dict(logging_cfg.get("wandb") or {})
-    base = wandb_cfg.get("run_name") or cfg["optuna"].get("study_name", "eyenet-hpo")
+    study = cfg["optuna"].get("study_name", "eyenet-hpo")
+    base = wandb_cfg.get("run_name") or study
     wandb_cfg["run_name"] = f"{base}-t{trial_number}"
+    # dict.fromkeys: append the study tag without duplicating it, order-stably.
+    wandb_cfg["tags"] = list(dict.fromkeys([*(wandb_cfg.get("tags") or []), study]))
     logging_cfg["wandb"] = wandb_cfg
     return build_loggers({**cfg, "logging": logging_cfg}, out)
+
+
+@contextlib.contextmanager
+def trial_loggers(cfg: dict, out: Path, trial_number: int):
+    """Per-trial loggers, with the W&B run closed on *every* exit path.
+
+    Open and close live in one lexical unit so no future exit path can forget
+    the close -- see `finish_wandb_run` for why forgetting it silently merges
+    every trial into trial 0's run. The `finally` covers a normal return, the
+    `TrialPruned` raised by `PruningCallback`, and an OOM `RuntimeError`.
+    """
+    try:
+        yield build_loggers_for_trial(cfg, out, trial_number)
+    finally:
+        finish_wandb_run()
 
 
 def build_objective(cfg: dict, bundle, datamodule):
@@ -140,17 +162,18 @@ def build_objective(cfg: dict, bundle, datamodule):
         callbacks = [PruningCallback(trial, monitor=metric)] if pruner_on else []  # FR14
 
         out = Path(cfg["output"]["dir"])
-        trainer = pl.Trainer(
-            logger=build_loggers_for_trial(cfg, out, trial.number),  # FR16
-            callbacks=callbacks,
-            **cfg["trainer"],
-        )
-        trainer.fit(module, datamodule=datamodule)
+        with trial_loggers(cfg, out, trial.number) as loggers:  # FR16
+            trainer = pl.Trainer(
+                logger=loggers,
+                callbacks=callbacks,
+                **cfg["trainer"],
+            )
+            trainer.fit(module, datamodule=datamodule)
 
-        # FR13 step 6: no metric => the trial never validated. PRUNED, not a
-        # sentinel value that would pollute the study's best_value.
-        if metric not in trainer.callback_metrics:
-            raise optuna.TrialPruned()
-        return float(trainer.callback_metrics[metric])
+            # FR13 step 6: no metric => the trial never validated. PRUNED, not a
+            # sentinel value that would pollute the study's best_value.
+            if metric not in trainer.callback_metrics:
+                raise optuna.TrialPruned()
+            return float(trainer.callback_metrics[metric])
 
     return objective

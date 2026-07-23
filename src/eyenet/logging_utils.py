@@ -8,6 +8,7 @@ eyenet.hpo can import it without a sys.path shim. scripts/train.py re-exports
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 
@@ -46,3 +47,31 @@ def build_loggers(cfg: dict, out: Path) -> list:
         warnings.warn(f"W&B logging disabled ({type(e).__name__}: {e}); "
                       "continuing with CSVLogger only.")
     return loggers
+
+
+def finish_wandb_run() -> None:
+    """Close the process-global wandb run, if one is open -- the counterpart to
+    `build_loggers`' open.
+
+    Load-bearing for the Optuna study, not cosmetic. `WandbLogger.finalize()`
+    does NOT call `wandb.finish()`, and `WandbLogger.experiment` *reuses* a
+    non-None `wandb.run` instead of starting a new one (it only warns). So
+    without an explicit close between trials, every trial after the first logs
+    into trial 0's run: interleaved curves, a resetting global_step, and one
+    hparams config for N different configurations.
+
+    Checking the global `wandb.run` is exactly what Lightning itself checks, so
+    there is no second notion of "a run is open" that could drift.
+
+    Keyed off `sys.modules` so the disabled path never imports wandb (FR21), and
+    never raises -- instrumentation must not cost a queued run (FR25).
+    """
+    if "wandb" not in sys.modules:
+        return
+    try:
+        import wandb
+
+        if wandb.run is not None:
+            wandb.finish()
+    except Exception as e:
+        warnings.warn(f"could not close the W&B run ({type(e).__name__}: {e})")

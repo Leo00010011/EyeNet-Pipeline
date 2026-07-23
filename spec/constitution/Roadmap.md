@@ -174,6 +174,8 @@ Status: R0 evedataset integration confirmed and tested; scope and ordering beyon
   4. Both loss branches reachable: 9 `angular` / 3 `cosine` sampled.
   5. **Handoff works**: `best_params.yaml` pasted into a `model:` block is accepted by `scripts/train.py`'s `main` without error.
 
+⚠️ **Spec correction — a per-trial `WandbLogger` does not give a per-trial W&B run.** Found while reviewing the cluster job before R3's search. `WandbLogger.experiment` reuses a non-None process-global `wandb.run` rather than starting a new one, and `WandbLogger.finalize()` never calls `wandb.finish()` — so all 30 trials of a cluster study logged into trial 0's run, with the computed `-t1`…`-t29` names discarded. Fixed by `logging_utils.finish_wandb_run()` + the `hpo.trial_loggers` context manager (see TechStack §One W&B run per trial), which closes the run on every trial exit path including prune and OOM. `build_loggers_for_trial` also now tags each run with the `study_name`. CSVLogger was never affected (`csv/version_N` auto-increments per trial) and remains the offline record. Tests: `tests/test_tune_script.py` Group 8, 8 new — all against a fake `wandb` module, nothing touches the network. ⚠️ The **live** offline-mode check (`WANDB_MODE=offline`, 3 trials ⇒ three `offline-run-*` dirs under `<output.dir>/wandb/`) is **not executed** — `wandb` is not installed in the dev environment; run it on the cluster node before the real search.
+
 ⚠️ **The notebook's angular-error values are not results** — 3 epochs × 3 batches per trial. They demonstrate the search *machinery*, nothing about model quality. Producing R3's actual tuned settings means running `py scripts/tune.py --config configs/optuna.yaml` at the shipped budget.
 
 ## R3 — Full Training & Evaluation
