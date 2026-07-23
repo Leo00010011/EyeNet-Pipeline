@@ -143,7 +143,7 @@ class GazeEstimationModule(pl.LightningModule):
         self.log("test/angular_error_deg", per_sample_deg.mean(), on_epoch=True)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(
+        return torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
