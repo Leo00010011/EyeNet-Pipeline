@@ -23,6 +23,7 @@ from pathlib import Path
 import torch
 import yaml
 from evedataset import EveBundle
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -97,7 +98,7 @@ def export(config_path: str, checkpoint_path: str, output_csv: str) -> Path:
             "angular_error_deg",
         ])
         for split in SPLITS:
-            for batch in loaders[split]:
+            for batch in tqdm(loaders[split], desc=f"export[{split}]", unit="batch"):
                 image, target, exp_key, frame, patch = batch
                 image = image.to(device)
                 target = target.to(device)
