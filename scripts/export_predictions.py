@@ -33,7 +33,7 @@ from eyenet.losses import angular_error_degrees  # noqa: E402
 # --------------------------------------------------------------------------- #
 # EDIT THESE (or pass --checkpoint / --config on the CLI, which override them). #
 # --------------------------------------------------------------------------- #
-CHECKPOINT_PATH = "runs/cluster_run_20260723_190831/checkpoints/'epoch=1-step=10354.ckpt'"
+CHECKPOINT_PATH = "runs/cluster_run_20260723_190831/checkpoints/epoch=1-step=10354.ckpt"
 CONFIG_PATH = "configs/cluster_run.yaml"
 OUTPUT_CSV = "predictions.csv"          # written next to the checkpoint's run dir
 SPLITS = ("val", "test")                # which splits to export
